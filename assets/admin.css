@@ -1,0 +1,249 @@
+/**
+ * Admin Styles
+ *
+ * @package WebPMediaHandler
+ */
+
+.wpmh-admin-wrap {
+	max-width: 1200px;
+	margin: 20px auto;
+}
+
+.wpmh-admin-container {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 20px;
+	margin-top: 20px;
+}
+
+.wpmh-feature-card {
+	background: #fff;
+	border: 1px solid #ccd0d4;
+	border-radius: 4px;
+	padding: 20px;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+
+.wpmh-feature-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 15px;
+}
+
+.wpmh-feature-header h2 {
+	margin: 0;
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.wpmh-feature-description {
+	margin-bottom: 15px;
+	color: #646970;
+	line-height: 1.6;
+}
+
+.wpmh-feature-description p {
+	margin: 0;
+}
+
+.wpmh-feature-actions {
+	margin-top: 15px;
+}
+
+.wpmh-action-card {
+	border-left: 4px solid #2271b1;
+}
+
+/* Toggle Switch */
+.wpmh-toggle-switch {
+	position: relative;
+	display: inline-block;
+	width: 50px;
+	height: 24px;
+}
+
+.wpmh-toggle-switch input {
+	opacity: 0;
+	width: 0;
+	height: 0;
+}
+
+.wpmh-toggle-slider {
+	position: absolute;
+	cursor: pointer;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background-color: #ccc;
+	transition: 0.4s;
+	border-radius: 24px;
+}
+
+.wpmh-toggle-slider:before {
+	position: absolute;
+	content: "";
+	height: 18px;
+	width: 18px;
+	left: 3px;
+	bottom: 3px;
+	background-color: white;
+	transition: 0.4s;
+	border-radius: 50%;
+}
+
+.wpmh-toggle-switch input:checked + .wpmh-toggle-slider {
+	background-color: #2271b1;
+}
+
+.wpmh-toggle-switch input:checked + .wpmh-toggle-slider:before {
+	transform: translateX(26px);
+}
+
+.wpmh-toggle-switch input:focus + .wpmh-toggle-slider {
+	box-shadow: 0 0 1px #2271b1;
+}
+
+/* Action Button */
+.wpmh-action-button {
+	position: relative;
+}
+
+.wpmh-action-button:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+.wpmh-action-status {
+	margin-top: 10px;
+	padding: 10px;
+	border-radius: 4px;
+	display: none;
+}
+
+.wpmh-action-status.show {
+	display: block;
+}
+
+.wpmh-action-status.success {
+	background-color: #d4edda;
+	border: 1px solid #c3e6cb;
+	color: #155724;
+}
+
+.wpmh-action-status.error {
+	background-color: #f8d7da;
+	border: 1px solid #f5c6cb;
+	color: #721c24;
+}
+
+.wpmh-action-status.info {
+	background-color: #d1ecf1;
+	border: 1px solid #bee5eb;
+	color: #0c5460;
+}
+
+.wpmh-last-run {
+	margin-bottom: 15px;
+	padding: 10px;
+	background-color: #f0f0f1;
+	border-radius: 4px;
+	font-size: 13px;
+}
+
+/* Responsive */
+@media (min-width: 768px) {
+	.wpmh-admin-container {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (min-width: 1200px) {
+	.wpmh-admin-container {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+/* Precaution Note */
+/* Neutral, informational styling - not a warning. Compliant with WordPress.org guidelines */
+.wpmh-precaution-note {
+	margin-top: 30px;
+	padding: 15px 20px;
+	background-color: #f0f6fc;
+	border-left: 4px solid #2271b1;
+	border-radius: 4px;
+}
+
+.wpmh-precaution-note p {
+	margin: 0;
+	color: #1d2327;
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+.wpmh-precaution-note strong {
+	color: #1d2327;
+}
+
+/* Support Section */
+/* Subtle, non-intrusive styling compliant with WordPress.org guidelines */
+.wpmh-support-section {
+	margin-top: 40px;
+	padding-top: 30px;
+	border-top: 1px solid #ccd0d4;
+}
+
+.wpmh-support-content {
+	text-align: center;
+	max-width: 600px;
+	margin: 0 auto;
+}
+
+.wpmh-support-content h3 {
+	margin: 0 0 10px 0;
+	font-size: 16px;
+	font-weight: 600;
+	color: #1d2327;
+}
+
+.wpmh-support-content > p {
+	margin: 0 0 15px 0;
+	color: #646970;
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+.wpmh-support-button-wrapper {
+	margin: 20px 0 !important;
+}
+
+.wpmh-support-button {
+	/* Subtle button styling - not primary to avoid being promotional */
+	background: #f6f7f7;
+	border-color: #dcdcde;
+	color: #2c3338;
+	text-decoration: none;
+}
+
+.wpmh-support-button:hover {
+	background: #f0f0f1;
+	border-color: #8c8f94;
+	color: #1d2327;
+}
+
+.wpmh-author-credit {
+	margin-top: 20px !important;
+	font-size: 13px !important;
+	color: #8c8f94 !important;
+}
+
+.wpmh-author-credit a {
+	color: #646970;
+	text-decoration: none;
+}
+
+.wpmh-author-credit a:hover {
+	color: #2271b1;
+	text-decoration: underline;
+}
