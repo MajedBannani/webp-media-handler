@@ -1,11 +1,11 @@
 <?php
 /**
  * Plugin Name: WebP Media Handler
- * Plugin URI: https://wordpress.org/plugins/webp-media-handler/
+ * Plugin URI: https://github.com/MajedBannani/webp-media-handler
  * Description: Handle WebP image conversion and optimization with explicit control. Disable default image sizes, auto-convert new uploads, and convert existing media with clear action buttons.
  * Version: 1.0.0
  * Author: Majed Talal
- * Author URI: https://github.com/majedtalal
+ * Author URI: https://github.com/MajedBannani
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: webp-media-handler

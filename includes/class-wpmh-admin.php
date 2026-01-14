@@ -316,7 +316,7 @@ class WPMH_Admin {
 					/* translators: %s: Author name with link */
 					printf(
 						esc_html__( 'Created by %s', 'webp-media-handler' ),
-						'<a href="' . esc_url( 'https://github.com/majedtalal' ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( 'Majed Talal' ) . '</a>'
+						'<a href="' . esc_url( 'https://github.com/MajedBannani' ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( 'Majed Talal' ) . '</a>'
 					);
 					?>
 				</p>
