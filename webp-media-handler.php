@@ -99,10 +99,11 @@ final class WebP_Media_Handler {
 	private function load_dependencies() {
 		require_once WPMH_PLUGIN_DIR . 'includes/class-wpmh-settings-manager.php';
 		require_once WPMH_PLUGIN_DIR . 'includes/class-wpmh-admin.php';
-		require_once WPMH_PLUGIN_DIR . 'includes/features/class-wpmh-disable-image-sizes.php';
-		require_once WPMH_PLUGIN_DIR . 'includes/features/class-wpmh-auto-webp-convert.php';
-		require_once WPMH_PLUGIN_DIR . 'includes/features/class-wpmh-convert-existing-webp.php';
-		require_once WPMH_PLUGIN_DIR . 'includes/features/class-wpmh-replace-image-urls.php';
+		// FIX: File names use 'iow' prefix but classes inside are correctly named WPMH_*
+		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-disable-image-sizes.php';
+		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-auto-webp-convert.php';
+		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-convert-existing-webp.php';
+		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-replace-image-urls.php';
 	}
 
 	/**
