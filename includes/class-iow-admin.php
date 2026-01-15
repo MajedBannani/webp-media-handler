@@ -57,8 +57,8 @@ class IOW_Admin {
 	 */
 	public function add_admin_menu() {
 		add_menu_page(
-			__( 'Image Optimization & WebP', 'image-optimization-webp' ),
-			__( 'Image Optimization', 'image-optimization-webp' ),
+			__( 'Image Optimization & WebP', 'webp-media-handler' ),
+			__( 'Image Optimization', 'webp-media-handler' ),
 			'manage_options',
 			'image-optimization-webp',
 			array( $this, 'render_admin_page' ),
@@ -103,10 +103,10 @@ class IOW_Admin {
 					'replace_urls'        => wp_create_nonce( 'iow_replace_image_urls' ),
 				),
 				'strings' => array(
-					'confirmConvert' => __( 'This will convert all existing JPEG/PNG images to WebP. This action cannot be undone automatically. Continue?', 'image-optimization-webp' ),
-					'confirmReplace' => __( 'This will replace image URLs throughout your site. This action cannot be undone automatically. Continue?', 'image-optimization-webp' ),
-					'processing'     => __( 'Processing...', 'image-optimization-webp' ),
-					'error'          => __( 'An error occurred. Please try again.', 'image-optimization-webp' ),
+					'confirmConvert' => __( 'This will convert all existing JPEG/PNG images to WebP. This action cannot be undone automatically. Continue?', 'webp-media-handler' ),
+					'confirmReplace' => __( 'This will replace image URLs throughout your site. This action cannot be undone automatically. Continue?', 'webp-media-handler' ),
+					'processing'     => __( 'Processing...', 'webp-media-handler' ),
+					'error'          => __( 'An error occurred. Please try again.', 'webp-media-handler' ),
 				),
 			)
 		);
@@ -118,7 +118,7 @@ class IOW_Admin {
 	public function handle_toggle() {
 		// Security checks
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'image-optimization-webp' ) ) );
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
 		}
 
 		check_ajax_referer( 'iow_toggle_feature', 'nonce' );
@@ -133,7 +133,7 @@ class IOW_Admin {
 		// Validate feature name
 		$allowed_features = array( 'disable_image_sizes', 'auto_webp_convert' );
 		if ( ! in_array( $feature, $allowed_features, true ) ) {
-			wp_send_json_error( array( 'message' => __( 'Invalid feature.', 'image-optimization-webp' ) ) );
+			wp_send_json_error( array( 'message' => __( 'Invalid feature.', 'webp-media-handler' ) ) );
 		}
 
 		// Update setting
@@ -141,8 +141,8 @@ class IOW_Admin {
 
 		wp_send_json_success( array(
 			'message' => $enabled
-				? __( 'Feature enabled.', 'image-optimization-webp' )
-				: __( 'Feature disabled.', 'image-optimization-webp' ),
+				? __( 'Feature enabled.', 'webp-media-handler' )
+				: __( 'Feature disabled.', 'webp-media-handler' ),
 		) );
 	}
 
@@ -161,32 +161,32 @@ class IOW_Admin {
 			<div class="iow-admin-container">
 				<?php $this->render_feature_card(
 					'disable_image_sizes',
-					__( 'Disable WordPress Default Image Sizes', 'image-optimization-webp' ),
+					__( 'Disable WordPress Default Image Sizes', 'webp-media-handler' ),
 					$this->features['disable_image_sizes']->get_description(),
 					false // No action button
 				); ?>
 
 				<?php $this->render_feature_card(
 					'auto_webp_convert',
-					__( 'Auto Convert Newly Uploaded Images to WebP', 'image-optimization-webp' ),
+					__( 'Auto Convert Newly Uploaded Images to WebP', 'webp-media-handler' ),
 					$this->features['auto_webp_convert']->get_description(),
 					false // No action button
 				); ?>
 
 				<?php $this->render_action_card(
 					'convert_existing',
-					__( 'Convert Existing Media Library Images to WebP', 'image-optimization-webp' ),
+					__( 'Convert Existing Media Library Images to WebP', 'webp-media-handler' ),
 					$this->features['convert_existing']->get_description(),
 					'iow_convert_existing_webp',
-					__( 'Convert Existing Images', 'image-optimization-webp' )
+					__( 'Convert Existing Images', 'webp-media-handler' )
 				); ?>
 
 				<?php $this->render_action_card(
 					'replace_urls',
-					__( 'Replace Existing Image URLs with WebP', 'image-optimization-webp' ),
+					__( 'Replace Existing Image URLs with WebP', 'webp-media-handler' ),
 					$this->features['replace_urls']->get_description(),
 					'iow_replace_image_urls',
-					__( 'Replace Image URLs', 'image-optimization-webp' )
+					__( 'Replace Image URLs', 'webp-media-handler' )
 				); ?>
 			</div>
 
@@ -255,7 +255,7 @@ class IOW_Admin {
 			</div>
 			<?php if ( $last_run ) : ?>
 				<div class="iow-last-run">
-					<strong><?php esc_html_e( 'Last run:', 'image-optimization-webp' ); ?></strong>
+					<strong><?php esc_html_e( 'Last run:', 'webp-media-handler' ); ?></strong>
 					<?php echo esc_html( $last_run ); ?>
 				</div>
 			<?php endif; ?>
@@ -283,8 +283,8 @@ class IOW_Admin {
 		?>
 		<div class="iow-precaution-note">
 			<p>
-				<strong><?php esc_html_e( 'Note:', 'image-optimization-webp' ); ?></strong>
-				<?php esc_html_e( 'Some actions on this page modify existing media files or database content. As a precaution, it\'s recommended to take a full website backup before running one-time actions.', 'image-optimization-webp' ); ?>
+				<strong><?php esc_html_e( 'Note:', 'webp-media-handler' ); ?></strong>
+				<?php esc_html_e( 'Some actions on this page modify existing media files or database content. As a precaution, it\'s recommended to take a full website backup before running one-time actions.', 'webp-media-handler' ); ?>
 			</p>
 		</div>
 		<?php
@@ -301,14 +301,14 @@ class IOW_Admin {
 		?>
 		<div class="iow-support-section">
 			<div class="iow-support-content">
-				<h3><?php esc_html_e( 'Support This Plugin', 'image-optimization-webp' ); ?></h3>
-				<p><?php esc_html_e( 'This plugin is completely free. If it has been helpful, you\'re welcome to support its ongoing maintenance and improvements.', 'image-optimization-webp' ); ?></p>
+				<h3><?php esc_html_e( 'Support This Plugin', 'webp-media-handler' ); ?></h3>
+				<p><?php esc_html_e( 'This plugin is completely free. If it has been helpful, you\'re welcome to support its ongoing maintenance and improvements.', 'webp-media-handler' ); ?></p>
 				<p class="iow-support-button-wrapper">
 					<a href="https://www.paypal.com/ncp/payment/2C3DDKHKMPMLC" 
 					   target="_blank" 
 					   rel="noopener noreferrer" 
 					   class="button iow-support-button">
-						<?php esc_html_e( 'Support Development', 'image-optimization-webp' ); ?>
+						<?php esc_html_e( 'Support Development', 'webp-media-handler' ); ?>
 					</a>
 				</p>
 				<p class="iow-author-credit">
@@ -316,7 +316,7 @@ class IOW_Admin {
 					/* translators: %s: Author name with link */
 					printf(
 						/* translators: %s: Author name with link */
-						esc_html__( 'Created by %s', 'image-optimization-webp' ),
+						esc_html__( 'Created by %s', 'webp-media-handler' ),
 						'<a href="' . esc_url( 'https://github.com/majedtalal' ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( 'Majed Talal' ) . '</a>'
 					);
 					?>

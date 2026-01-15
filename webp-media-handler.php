@@ -91,6 +91,20 @@ final class WebP_Media_Handler {
 
 		// Load hooks
 		$this->load_hooks();
+
+		// Load plugin text domain
+		$this->load_textdomain();
+	}
+
+	/**
+	 * Load plugin text domain
+	 */
+	private function load_textdomain() {
+		load_plugin_textdomain(
+			'webp-media-handler',
+			false,
+			dirname( WPMH_PLUGIN_BASENAME ) . '/languages'
+		);
 	}
 
 	/**
