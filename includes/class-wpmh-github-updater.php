@@ -72,10 +72,15 @@ class WPMH_GitHub_Updater {
 	/**
 	 * Check for plugin updates
 	 *
-	 * @param object $transient Update transient object.
-	 * @return object Modified transient object.
+	 * @param object|false $transient Update transient object or false.
+	 * @return object|false Modified transient object or false.
 	 */
 	public function check_for_update( $transient ) {
+		// Defensive guard: WordPress may pass false if transient doesn't exist
+		if ( ! is_object( $transient ) ) {
+			return $transient;
+		}
+
 		// Only run in admin area
 		if ( ! is_admin() ) {
 			return $transient;
