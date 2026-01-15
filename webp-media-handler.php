@@ -6,6 +6,7 @@
  * Version: 1.0.0
  * Author: Majed Talal
  * Author URI: https://github.com/MajedBannani
+ * Update URI: https://github.com/MajedBannani/webp-media-handler
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: webp-media-handler
@@ -118,6 +119,11 @@ final class WebP_Media_Handler {
 		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-auto-webp-convert.php';
 		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-convert-existing-webp.php';
 		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-replace-image-urls.php';
+
+		// Load GitHub updater only in admin area
+		if ( is_admin() ) {
+			require_once WPMH_PLUGIN_DIR . 'includes/class-wpmh-github-updater.php';
+		}
 	}
 
 	/**
@@ -135,6 +141,9 @@ final class WebP_Media_Handler {
 	 */
 	private function init_admin() {
 		new WPMH_Admin( $this->settings, $this->features );
+		
+		// Initialize GitHub updater
+		new WPMH_GitHub_Updater( WPMH_PLUGIN_BASENAME, WPMH_VERSION );
 	}
 
 	/**
