@@ -88,6 +88,13 @@ class WPMH_GitHub_Updater {
 			return $transient;
 		}
 
+		// Find ZIP asset from release
+		$zip_asset_url = $this->get_zip_asset_url( $release_data );
+		if ( ! $zip_asset_url ) {
+			// No valid ZIP asset found - do not provide update
+			return $transient;
+		}
+
 		// Extract version from tag (remove leading 'v' if present)
 		$latest_version = $this->normalize_version( $release_data->tag_name );
 
@@ -103,7 +110,7 @@ class WPMH_GitHub_Updater {
 				'plugin'      => $this->plugin_basename,
 				'new_version' => $latest_version,
 				'url'         => 'https://github.com/MajedBannani/webp-media-handler',
-				'package'     => $release_data->zipball_url,
+				'package'     => $zip_asset_url,
 			);
 		}
 
@@ -136,6 +143,13 @@ class WPMH_GitHub_Updater {
 			return $result;
 		}
 
+		// Find ZIP asset from release
+		$zip_asset_url = $this->get_zip_asset_url( $release_data );
+		if ( ! $zip_asset_url ) {
+			// No valid ZIP asset found - return original result
+			return $result;
+		}
+
 		$latest_version = $this->normalize_version( $release_data->tag_name );
 
 		// Prepare plugin information
@@ -146,7 +160,7 @@ class WPMH_GitHub_Updater {
 			'author'        => '<a href="https://github.com/MajedBannani">Majed Talal</a>',
 			'homepage'      => 'https://github.com/MajedBannani/webp-media-handler',
 			'short_description' => 'Handle WebP image conversion and optimization with explicit control.',
-			'download_link' => $release_data->zipball_url,
+			'download_link' => $zip_asset_url,
 			'sections'      => array(
 				'description' => __( 'Handle WebP image conversion and optimization with explicit control. Disable default image sizes, auto-convert new uploads, and convert existing media with clear action buttons.', 'webp-media-handler' ),
 			),
@@ -201,7 +215,7 @@ class WPMH_GitHub_Updater {
 		$body = wp_remote_retrieve_body( $response );
 		$data = json_decode( $body );
 
-		if ( ! $data || ! isset( $data->tag_name ) || ! isset( $data->zipball_url ) ) {
+		if ( ! $data || ! isset( $data->tag_name ) || ! isset( $data->assets ) || ! is_array( $data->assets ) ) {
 			$error = new WP_Error(
 				'invalid_github_response',
 				__( 'Invalid response from GitHub API', 'webp-media-handler' )
@@ -214,6 +228,59 @@ class WPMH_GitHub_Updater {
 		set_transient( $this->transient_name, $data, 12 * HOUR_IN_SECONDS );
 
 		return $data;
+	}
+
+	/**
+	 * Get ZIP asset URL from release data
+	 *
+	 * Prefers assets named exactly "webp-media-handler.zip",
+	 * falls back to any asset ending in ".zip".
+	 *
+	 * @param object $release_data Release data from GitHub API.
+	 * @return string|false ZIP asset browser_download_url, or false if not found.
+	 */
+	private function get_zip_asset_url( $release_data ) {
+		if ( ! isset( $release_data->assets ) || ! is_array( $release_data->assets ) ) {
+			return false;
+		}
+
+		$preferred_asset = null;
+		$fallback_asset = null;
+
+		// Search through assets
+		foreach ( $release_data->assets as $asset ) {
+			if ( ! isset( $asset->name ) || ! isset( $asset->browser_download_url ) ) {
+				continue;
+			}
+
+			// Check if asset is a ZIP file
+			if ( '.zip' !== substr( strtolower( $asset->name ), -4 ) ) {
+				continue;
+			}
+
+			// Prefer exact match: webp-media-handler.zip
+			if ( 'webp-media-handler.zip' === $asset->name ) {
+				$preferred_asset = $asset;
+				break; // Found preferred asset, stop searching
+			}
+
+			// Keep first ZIP asset as fallback
+			if ( null === $fallback_asset ) {
+				$fallback_asset = $asset;
+			}
+		}
+
+		// Return preferred asset if found, otherwise fallback
+		if ( $preferred_asset && isset( $preferred_asset->browser_download_url ) ) {
+			return $preferred_asset->browser_download_url;
+		}
+
+		if ( $fallback_asset && isset( $fallback_asset->browser_download_url ) ) {
+			return $fallback_asset->browser_download_url;
+		}
+
+		// No valid ZIP asset found
+		return false;
 	}
 
 	/**
