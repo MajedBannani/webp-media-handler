@@ -65,6 +65,11 @@ class WPMH_GitHub_Updater {
 		add_filter( 'site_transient_update_plugins', array( $this, 'check_for_update' ) );
 		add_filter( 'plugins_api', array( $this, 'plugins_api_filter' ), 10, 3 );
 		
+		// Validate ZIP structure before installation to prevent folder mismatches
+		// WordPress requires the extracted folder to match the installed plugin folder exactly
+		// Otherwise it treats the update as a different plugin and deactivates it
+		add_filter( 'upgrader_source_selection', array( $this, 'filter_source_selection' ), 10, 4 );
+		
 		// Clear cache when update is complete
 		add_action( 'upgrader_process_complete', array( $this, 'clear_transient_cache' ), 10, 2 );
 	}
@@ -238,8 +243,10 @@ class WPMH_GitHub_Updater {
 	/**
 	 * Get ZIP asset URL from release data
 	 *
-	 * Prefers assets named exactly "webp-media-handler.zip",
-	 * falls back to any asset ending in ".zip".
+	 * REQUIRES assets named exactly "webp-media-handler.zip".
+	 * Does NOT fall back to other ZIPs to prevent folder structure mismatches.
+	 * GitHub-generated source ZIPs (zipball_url) extract to versioned folders
+	 * like webp-media-handler-v1.0.x/ which cause plugin deactivation.
 	 *
 	 * @param object $release_data Release data from GitHub API.
 	 * @return string|false ZIP asset browser_download_url, or false if not found.
@@ -249,43 +256,77 @@ class WPMH_GitHub_Updater {
 			return false;
 		}
 
-		$preferred_asset = null;
-		$fallback_asset = null;
-
-		// Search through assets
+		// Search for the exact asset name - no fallbacks to prevent folder mismatches
 		foreach ( $release_data->assets as $asset ) {
 			if ( ! isset( $asset->name ) || ! isset( $asset->browser_download_url ) ) {
 				continue;
 			}
 
-			// Check if asset is a ZIP file
-			if ( '.zip' !== substr( strtolower( $asset->name ), -4 ) ) {
-				continue;
-			}
-
-			// Prefer exact match: webp-media-handler.zip
+			// Only accept the exact asset name: webp-media-handler.zip
+			// This ensures the ZIP was built by our GitHub Action with correct structure
 			if ( 'webp-media-handler.zip' === $asset->name ) {
-				$preferred_asset = $asset;
-				break; // Found preferred asset, stop searching
-			}
-
-			// Keep first ZIP asset as fallback
-			if ( null === $fallback_asset ) {
-				$fallback_asset = $asset;
+				return $asset->browser_download_url;
 			}
 		}
 
-		// Return preferred asset if found, otherwise fallback
-		if ( $preferred_asset && isset( $preferred_asset->browser_download_url ) ) {
-			return $preferred_asset->browser_download_url;
-		}
-
-		if ( $fallback_asset && isset( $fallback_asset->browser_download_url ) ) {
-			return $fallback_asset->browser_download_url;
-		}
-
-		// No valid ZIP asset found
+		// No valid ZIP asset found - do not fall back to zipball_url or other ZIPs
 		return false;
+	}
+
+	/**
+	 * Validate extracted ZIP structure before WordPress installs it
+	 *
+	 * WordPress requires the extracted folder name to match the installed plugin folder
+	 * exactly. If there's a mismatch, WordPress treats it as a different plugin and
+	 * deactivates the original, causing "Plugin file does not exist" errors.
+	 *
+	 * This filter runs after WordPress extracts the ZIP but before it moves files.
+	 * We validate that the extracted folder is exactly "webp-media-handler" and
+	 * contains the main plugin file at the correct path.
+	 *
+	 * @param string|WP_Error $source        Source directory path.
+	 * @param string          $remote_source Remote source directory.
+	 * @param WP_Upgrader     $upgrader      Upgrader instance.
+	 * @param array           $hook_extra    Hook extra arguments.
+	 * @return string|WP_Error Source directory or WP_Error if validation fails.
+	 */
+	public function filter_source_selection( $source, $remote_source, $upgrader, $hook_extra ) {
+		// Only validate our plugin updates
+		if ( ! isset( $upgrader->skin->plugin ) || $upgrader->skin->plugin !== $this->plugin_basename ) {
+			return $source;
+		}
+
+		// If source is already an error, return it
+		if ( is_wp_error( $source ) ) {
+			return $source;
+		}
+
+		// Get the extracted folder name
+		$extracted_folder = basename( wp_normalize_path( untrailingslashit( $source ) ) );
+
+		// WordPress requires exact folder name match: webp-media-handler
+		if ( 'webp-media-handler' !== $extracted_folder ) {
+			return new WP_Error(
+				'wpmh_github_folder_mismatch',
+				sprintf(
+					/* translators: %s: Extracted folder name */
+					__( 'Update package extracted to incorrect folder "%s". Expected "webp-media-handler". Update aborted to prevent plugin deactivation.', 'webp-media-handler' ),
+					esc_html( $extracted_folder )
+				)
+			);
+		}
+
+		// Verify main plugin file exists at the correct path
+		$main_file = trailingslashit( $source ) . 'webp-media-handler.php';
+		if ( ! file_exists( $main_file ) ) {
+			return new WP_Error(
+				'wpmh_github_missing_main_file',
+				__( 'Update package is missing the main plugin file (webp-media-handler.php). Update aborted.', 'webp-media-handler' )
+			);
+		}
+
+		// Validation passed - allow WordPress to proceed with installation
+		return $source;
 	}
 
 	/**

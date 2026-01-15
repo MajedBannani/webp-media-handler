@@ -1,0 +1,138 @@
+name: Build Release ZIP
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Validate plugin structure
+        run: |
+          if [ ! -f "webp-media-handler.php" ]; then
+            echo "ERROR: Main plugin file webp-media-handler.php not found"
+            exit 1
+          fi
+          
+          if [ ! -d "includes" ]; then
+            echo "ERROR: includes directory not found"
+            exit 1
+          fi
+          
+          echo "Plugin structure validated"
+
+      - name: Create plugin directory structure
+        run: |
+          # Create temporary directory with correct plugin folder name
+          mkdir -p build/webp-media-handler
+          
+          # Copy all plugin files to the build directory
+          # Exclude .git, .github, and other non-plugin files
+          rsync -av \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.DS_Store' \
+            --exclude='node_modules' \
+            --exclude='vendor' \
+            --exclude='*.md' \
+            --exclude='.gitignore' \
+            --exclude='.gitattributes' \
+            --exclude='composer.json' \
+            --exclude='composer.lock' \
+            --exclude='package.json' \
+            --exclude='package-lock.json' \
+            ./ build/webp-media-handler/
+
+      - name: Validate ZIP structure
+        run: |
+          # Verify the main plugin file exists in the correct location
+          if [ ! -f "build/webp-media-handler/webp-media-handler.php" ]; then
+            echo "ERROR: Main plugin file not found in build directory"
+            exit 1
+          fi
+          
+          # Verify the folder name is exactly webp-media-handler
+          FOLDER_NAME=$(basename build/webp-media-handler)
+          if [ "$FOLDER_NAME" != "webp-media-handler" ]; then
+            echo "ERROR: Folder name is '$FOLDER_NAME', expected 'webp-media-handler'"
+            exit 1
+          fi
+          
+          # Verify no files are outside the plugin directory
+          FILES_OUTSIDE=$(find build -mindepth 1 -maxdepth 1 ! -name "webp-media-handler" -type f 2>/dev/null | wc -l)
+          if [ "$FILES_OUTSIDE" -gt 0 ]; then
+            echo "ERROR: Files found outside webp-media-handler directory"
+            find build -mindepth 1 -maxdepth 1 ! -name "webp-media-handler"
+            exit 1
+          fi
+          
+          echo "ZIP structure validated successfully"
+
+      - name: Create ZIP file
+        run: |
+          cd build
+          zip -r ../webp-media-handler.zip webp-media-handler/
+          cd ..
+          
+          # Verify ZIP was created
+          if [ ! -f "webp-media-handler.zip" ]; then
+            echo "ERROR: ZIP file was not created"
+            exit 1
+          fi
+          
+          # Verify ZIP contains the correct structure
+          ZIP_CONTENTS=$(unzip -l webp-media-handler.zip | head -5)
+          if ! echo "$ZIP_CONTENTS" | grep -q "webp-media-handler/"; then
+            echo "ERROR: ZIP does not contain webp-media-handler/ directory"
+            exit 1
+          fi
+          
+          if ! unzip -l webp-media-handler.zip | grep -q "webp-media-handler/webp-media-handler.php"; then
+            echo "ERROR: ZIP does not contain webp-media-handler/webp-media-handler.php"
+            exit 1
+          fi
+          
+          echo "ZIP file created and validated"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: webp-media-handler.zip
+          name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## WebP Media Handler ${{ steps.version.outputs.version }}
+            
+            ### Installation
+            
+            Download `webp-media-handler.zip` and install via WordPress admin or upload to `wp-content/plugins/`.
+            
+            The ZIP extracts to `webp-media-handler/` with the main file at `webp-media-handler/webp-media-handler.php`.
+            
+            ### Changelog
+            
+            See the [full changelog](https://github.com/MajedBannani/webp-media-handler/compare/v${{ github.event.before }}...v${{ steps.version.outputs.version }}) for details.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf build
+          rm -f webp-media-handler.zip
