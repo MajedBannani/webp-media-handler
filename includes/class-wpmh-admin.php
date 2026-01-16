@@ -109,7 +109,6 @@ class WPMH_Admin {
 				'strings' => array(
 					'confirmConvert' => __( 'This will convert all existing JPEG/PNG images to WebP. This action cannot be undone automatically. Continue?', 'webp-media-handler' ),
 					'confirmWatermark' => __( 'This will apply watermarks to selected images. This action will modify your images and cannot be undone automatically. Continue?', 'webp-media-handler' ),
-					'confirmWatermarkAll' => __( 'This will apply watermarks to ALL images in your media library. This action will modify your images and cannot be undone automatically. Are you sure you want to continue?', 'webp-media-handler' ),
 					'processing'     => __( 'Processing...', 'webp-media-handler' ),
 					'error'          => __( 'An error occurred. Please try again.', 'webp-media-handler' ),
 					'selectWatermark' => __( 'Please select a watermark image.', 'webp-media-handler' ),
@@ -352,7 +351,6 @@ class WPMH_Admin {
 		$watermark_id = 0; // Always start empty
 		$watermark_size = 100; // Default only
 		$watermark_position = 'bottom-right'; // Default only
-		$target_mode = 'selected'; // Default only
 		
 		$log = $this->settings->get_action_log( 'apply_watermark' );
 		$last_run = $log ? $log['timestamp'] : '';
@@ -443,18 +441,6 @@ class WPMH_Admin {
 						<label>
 							<strong><?php esc_html_e( 'Target Images:', 'webp-media-handler' ); ?></strong>
 						</label>
-						<div class="wpmh-watermark-target-mode">
-							<label>
-								<input type="radio" name="wpmh-watermark-target-mode" value="selected" checked>
-								<?php esc_html_e( 'Selected Images', 'webp-media-handler' ); ?>
-							</label>
-							<br>
-							<label>
-								<input type="radio" name="wpmh-watermark-target-mode" value="all">
-								<?php esc_html_e( 'All Images', 'webp-media-handler' ); ?>
-								<strong class="wpmh-warning-text"><?php esc_html_e( '(Applies to all images in Media Library)', 'webp-media-handler' ); ?></strong>
-							</label>
-						</div>
 						<div class="wpmh-selected-images-container" id="wpmh-selected-images-container" style="display: block;">
 							<button type="button" class="button wpmh-select-images-btn" id="wpmh-select-images-btn">
 								<?php esc_html_e( 'Select Images from Media Library', 'webp-media-handler' ); ?>
@@ -533,12 +519,6 @@ class WPMH_Admin {
 				$allowed_positions = array( 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center' );
 				if ( ! in_array( $settings['watermark_position'], $allowed_positions, true ) ) {
 					unset( $settings['watermark_position'] );
-				}
-			}
-			if ( isset( $settings['watermark_target_mode'] ) ) {
-				$allowed_modes = array( 'selected', 'all' );
-				if ( ! in_array( $settings['watermark_target_mode'], $allowed_modes, true ) ) {
-					unset( $settings['watermark_target_mode'] );
 				}
 			}
 			// NEW DESIGN: Filter out watermark settings - do NOT save them

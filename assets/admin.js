@@ -50,9 +50,6 @@
 			$(document).on('click', '.wpmh-select-watermark-image', this.selectWatermarkImage);
 			$(document).on('click', '.wpmh-remove-watermark-image', this.removeWatermarkImage);
 			
-			// Target mode change
-			$(document).on('change', 'input[name="wpmh-watermark-target-mode"]', this.handleTargetModeChange);
-			
 			// Select images button
 			$(document).on('click', '.wpmh-select-images-btn', this.selectTargetImages);
 			
@@ -146,17 +143,12 @@
 					return;
 				}
 
-				var targetMode = $('input[name="wpmh-watermark-target-mode"]:checked').val();
-				if (targetMode === 'selected') {
-					var selectedImages = WPMHAdmin.getSelectedImageIds();
-					if (selectedImages.length === 0) {
-						alert(wpmhAdmin.strings.selectImages);
-						return;
-					}
-					confirmMessage = wpmhAdmin.strings.confirmWatermark;
-				} else {
-					confirmMessage = wpmhAdmin.strings.confirmWatermarkAll;
+				var selectedImages = WPMHAdmin.getSelectedImageIds();
+				if (selectedImages.length === 0) {
+					alert(wpmhAdmin.strings.selectImages);
+					return;
 				}
+				confirmMessage = wpmhAdmin.strings.confirmWatermark;
 			}
 
 			if (confirmMessage && !confirm(confirmMessage)) {
@@ -202,11 +194,7 @@
 				postData.watermark_id = $('#wpmh-watermark-image-id').val();
 				postData.watermark_size = $('#wpmh-watermark-size').val();
 				postData.watermark_position = $('#wpmh-watermark-position').val();
-				postData.target_mode = $('input[name="wpmh-watermark-target-mode"]:checked').val();
-				
-				if (postData.target_mode === 'selected') {
-					postData.selected_images = WPMHAdmin.getSelectedImageIds();
-				}
+				postData.selected_images = WPMHAdmin.getSelectedImageIds();
 			}
 
 			$.ajax({
@@ -336,18 +324,6 @@
 			$('#wpmh-watermark-preview').hide().html('');
 			$(this).hide();
 			// Do NOT save to database - watermark settings are runtime-only
-		},
-
-		/**
-		 * Handle target mode change
-		 */
-		handleTargetModeChange: function() {
-			var mode = $(this).val();
-			if (mode === 'selected') {
-				$('#wpmh-selected-images-container').show();
-			} else {
-				$('#wpmh-selected-images-container').hide();
-			}
 		},
 
 		/**
