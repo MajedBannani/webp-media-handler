@@ -168,12 +168,14 @@ class WPMH_Image_Watermark {
 		// Reset counters at start of new run (offset === 0), otherwise continue tracking current run
 		$current_run_success = 0;
 		$current_run_failed = 0;
+		$current_run_skipped = 0; // Track skipped images (e.g., watermark source excluded)
 		
 		if ( $offset > 0 ) {
 			// This is a continuation batch - get counts from current run tracking
 			$log = $this->settings->get_action_log( 'apply_watermark' );
 			$current_run_success = isset( $log['data']['current_run_success'] ) ? (int) $log['data']['current_run_success'] : 0;
 			$current_run_failed = isset( $log['data']['current_run_failed'] ) ? (int) $log['data']['current_run_failed'] : 0;
+			$current_run_skipped = isset( $log['data']['current_run_skipped'] ) ? (int) $log['data']['current_run_skipped'] : 0;
 		} else {
 			// Start of new run - reset counters (do not accumulate from previous runs)
 			// Clear any previous run data, keep only timestamp for "last run" display
@@ -181,13 +183,19 @@ class WPMH_Image_Watermark {
 				'timestamp' => current_time( 'mysql' ),
 				'current_run_success' => 0,
 				'current_run_failed' => 0,
+				'current_run_skipped' => 0,
 			) );
 		}
 
+		// FIX 1: EXCLUDE WATERMARK IMAGE FROM TARGETS (Hard block)
+		// Always remove watermark_id from target list to prevent watermarking the watermark itself
+		$watermark_id_absint = absint( $watermark_id );
+		
 		// Get target images based on mode
 		$selected_ids = array();
 		if ( 'all' === $target_mode ) {
-			$images = $this->get_all_images( $offset, $batch_size );
+			// FIX 1: Exclude watermark from "All Images" query
+			$images = $this->get_all_images( $offset, $batch_size, $watermark_id_absint );
 		} else {
 			// Get selected images from POST data
 			$selected_ids = isset( $_POST['selected_images'] ) ? wp_unslash( $_POST['selected_images'] ) : array();
@@ -196,7 +204,22 @@ class WPMH_Image_Watermark {
 			}
 			$selected_ids = array_map( 'absint', $selected_ids );
 			$selected_ids = array_filter( $selected_ids );
-			$selected_ids = array_values( $selected_ids ); // Re-index array
+			
+			// FIX 1: Remove watermark_id from selected_ids to prevent watermarking the watermark
+			$original_count = count( $selected_ids );
+			$selected_ids = array_values( array_diff( $selected_ids, array( $watermark_id_absint ) ) );
+			$excluded_count = $original_count - count( $selected_ids );
+			
+			// Track if watermark was excluded in this batch
+			if ( $excluded_count > 0 && $offset === 0 ) {
+				$current_run_skipped += $excluded_count;
+				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+					error_log( sprintf(
+						'[WPMH Watermark] Excluded watermark source image (ID: %d) from target list to prevent self-watermarking',
+						$watermark_id_absint
+					) );
+				}
+			}
 			
 			if ( empty( $selected_ids ) ) {
 				wp_send_json_error( array( 'message' => __( 'No images selected. Please select images to watermark.', 'webp-media-handler' ) ) );
@@ -212,6 +235,21 @@ class WPMH_Image_Watermark {
 			$final_success = isset( $log['data']['current_run_success'] ) ? (int) $log['data']['current_run_success'] : 0;
 			$final_failed = isset( $log['data']['current_run_failed'] ) ? (int) $log['data']['current_run_failed'] : 0;
 			$final_skipped = isset( $log['data']['current_run_skipped'] ) ? (int) $log['data']['current_run_skipped'] : 0;
+			
+			// FIX 4: Add safety notice if watermark source was skipped
+			$watermark_was_skipped = false;
+			if ( $final_skipped > 0 ) {
+				// Check if watermark was in selected targets (only in "selected" mode)
+				if ( 'selected' === $target_mode && isset( $_POST['selected_images'] ) ) {
+					$post_selected = wp_unslash( $_POST['selected_images'] );
+					if ( is_array( $post_selected ) ) {
+						$post_selected_ids = array_map( 'absint', $post_selected );
+						if ( in_array( $watermark_id_absint, $post_selected_ids, true ) ) {
+							$watermark_was_skipped = true;
+						}
+					}
+				}
+			}
 
 			// Clear current run counters (keep only timestamp for "last run" display)
 			$this->settings->log_action( 'apply_watermark', array(
@@ -247,6 +285,11 @@ class WPMH_Image_Watermark {
 			if ( ! empty( $message_parts ) ) {
 				$message .= ' ' . implode( '. ', $message_parts ) . '.';
 			}
+			
+			// FIX 4: Add safety notice if watermark source was skipped
+			if ( $watermark_was_skipped ) {
+				$message .= ' ' . __( 'Note: Watermark source image was skipped to prevent watermarking the watermark.', 'webp-media-handler' );
+			}
 
 			// FIX E: Store notice in transient for display on admin page (if needed)
 			// The AJAX response will show the message immediately, but also store for page reload
@@ -270,8 +313,30 @@ class WPMH_Image_Watermark {
 		// Process batch - track counts for CURRENT run only
 		$batch_success = 0;
 		$batch_failed = 0;
+		$batch_skipped = 0;
+
+		// FIX 2: Get watermark file path for realpath comparison
+		$watermark_file_path = get_attached_file( $watermark_id );
+		$watermark_realpath = $watermark_file_path ? realpath( $watermark_file_path ) : false;
 
 		foreach ( $images as $attachment_id ) {
+			// FIX 2: Realpath comparison guard - prevent watermarking the watermark file itself
+			$target_file_path = get_attached_file( $attachment_id );
+			$target_realpath = $target_file_path ? realpath( $target_file_path ) : false;
+			
+			// Skip if target file is the watermark file (second layer of protection)
+			if ( $watermark_realpath && $target_realpath && $watermark_realpath === $target_realpath ) {
+				$batch_skipped++;
+				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+					error_log( sprintf(
+						'[WPMH Watermark] SKIPPED: Attachment ID %d is the watermark source file (%s)',
+						$attachment_id,
+						$target_file_path
+					) );
+				}
+				continue;
+			}
+			
 			if ( $this->apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position ) ) {
 				$batch_success++;
 			} else {
@@ -282,17 +347,19 @@ class WPMH_Image_Watermark {
 		// Update current run totals (accumulate within this request only)
 		$current_run_success += $batch_success;
 		$current_run_failed += $batch_failed;
+		$current_run_skipped += $batch_skipped;
 
 		// FIX E: Store only current run counts (not accumulated from previous runs)
 		$this->settings->log_action( 'apply_watermark', array(
 			'timestamp' => current_time( 'mysql' ),
 			'current_run_success' => $current_run_success,
 			'current_run_failed' => $current_run_failed,
-			'current_run_skipped' => 0, // Track skipped if needed in future
+			'current_run_skipped' => $current_run_skipped,
 		) );
 
 		// Return progress
-		$total = ( 'all' === $target_mode ) ? $this->get_total_images() : count( $selected_ids );
+		// FIX 1: For "all" mode, exclude watermark from total count
+		$total = ( 'all' === $target_mode ) ? $this->get_total_images( $watermark_id_absint ) : count( $selected_ids );
 		$processed = $offset + count( $images );
 
 		wp_send_json_success( array(
@@ -303,8 +370,8 @@ class WPMH_Image_Watermark {
 				$total
 			),
 			'offset' => $processed,
-			'success' => $success_count,
-			'failed' => $failed_count,
+			'success' => $batch_success,
+			'failed' => $batch_failed,
 			'completed' => false,
 		) );
 	}
@@ -316,7 +383,15 @@ class WPMH_Image_Watermark {
 	 * @param int $limit Number of images to retrieve.
 	 * @return array Array of attachment IDs.
 	 */
-	private function get_all_images( $offset = 0, $limit = 10 ) {
+	/**
+	 * Get all images for watermarking (excluding watermark source)
+	 *
+	 * @param int   $offset Offset for pagination.
+	 * @param int   $limit Number of images to retrieve.
+	 * @param int   $exclude_id Attachment ID to exclude (watermark source).
+	 * @return array Array of attachment IDs.
+	 */
+	private function get_all_images( $offset = 0, $limit = 10, $exclude_id = 0 ) {
 		$args = array(
 			'post_type'      => 'attachment',
 			'post_mime_type' => 'image',
@@ -327,6 +402,11 @@ class WPMH_Image_Watermark {
 			'orderby'        => 'ID',
 			'order'          => 'ASC',
 		);
+
+		// FIX 1: Exclude watermark source image from query
+		if ( $exclude_id > 0 ) {
+			$args['post__not_in'] = array( $exclude_id );
+		}
 
 		$query = new WP_Query( $args );
 		return $query->posts;
@@ -352,11 +432,12 @@ class WPMH_Image_Watermark {
 	}
 
 	/**
-	 * Get total count of images
+	 * Get total count of images (excluding watermark source)
 	 *
+	 * @param int $exclude_id Attachment ID to exclude (watermark source).
 	 * @return int
 	 */
-	private function get_total_images() {
+	private function get_total_images( $exclude_id = 0 ) {
 		$args = array(
 			'post_type'      => 'attachment',
 			'post_mime_type' => 'image',
@@ -364,6 +445,11 @@ class WPMH_Image_Watermark {
 			'posts_per_page' => -1,
 			'fields'         => 'ids',
 		);
+
+		// FIX 1: Exclude watermark source image from total count
+		if ( $exclude_id > 0 ) {
+			$args['post__not_in'] = array( $exclude_id );
+		}
 
 		$query = new WP_Query( $args );
 		return $query->found_posts;

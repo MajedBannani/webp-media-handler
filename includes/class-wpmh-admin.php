@@ -350,6 +350,12 @@ class WPMH_Admin {
 							<p class="description">
 								<?php esc_html_e( 'Select a PNG, JPG, or WebP image from your Media Library to use as a watermark.', 'webp-media-handler' ); ?>
 							</p>
+							<?php if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) : ?>
+								<p class="description" style="color: #d63638; margin-top: 8px;">
+									<strong><?php esc_html_e( 'Note:', 'webp-media-handler' ); ?></strong>
+									<?php esc_html_e( 'If your watermark image already contains an old watermark, re-upload a clean watermark image. The plugin prevents watermarking the watermark from now on.', 'webp-media-handler' ); ?>
+								</p>
+							<?php endif; ?>
 						</div>
 					</div>
 
