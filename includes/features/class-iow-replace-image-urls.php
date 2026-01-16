@@ -40,6 +40,13 @@ class WPMH_Replace_Image_URLs {
 	private $max_execution_time = 10;
 
 	/**
+	 * Debug log file path
+	 *
+	 * @var string|null
+	 */
+	private $debug_log_file = null;
+
+	/**
 	 * Protected keys that must remain as attachment IDs (never converted to URLs)
 	 * These are WordPress core theme_mod keys that must always be integers
 	 *
@@ -66,7 +73,67 @@ class WPMH_Replace_Image_URLs {
 	 */
 	public function __construct( $settings ) {
 		$this->settings = $settings;
+		$this->init_debug_log();
 		$this->init_hooks();
+	}
+
+	/**
+	 * Initialize debug log file path
+	 */
+	private function init_debug_log() {
+		$upload_dir = wp_upload_dir();
+		$log_dir = $upload_dir['basedir'] . '/webp-media-handler';
+		
+		if ( ! file_exists( $log_dir ) ) {
+			wp_mkdir_p( $log_dir );
+		}
+		
+		$this->debug_log_file = $log_dir . '/replace-urls-debug.log';
+	}
+
+	/**
+	 * Write debug log entry
+	 *
+	 * @param array $data Debug data to log.
+	 */
+	private function write_debug_log( $data ) {
+		if ( ! $this->debug_log_file ) {
+			return;
+		}
+
+		$entry = array(
+			'timestamp' => current_time( 'mysql' ),
+			'data' => $data,
+		);
+
+		$log_line = wp_json_encode( $entry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n" . str_repeat( '-', 80 ) . "\n";
+		file_put_contents( $this->debug_log_file, $log_line, FILE_APPEND | LOCK_EX );
+	}
+
+	/**
+	 * Build comprehensive error payload
+	 *
+	 * @param Exception|Error|string $error Error object or message.
+	 * @param array                  $context Additional context data.
+	 * @return array Error payload.
+	 */
+	private function build_error_payload( $error, $context = array() ) {
+		$payload = array(
+			'error_message' => is_string( $error ) ? $error : $error->getMessage(),
+			'error_type' => is_object( $error ) ? get_class( $error ) : 'string',
+			'timestamp' => current_time( 'mysql' ),
+		);
+
+		if ( $error instanceof Exception || $error instanceof Error ) {
+			$payload['file'] = $error->getFile();
+			$payload['line'] = $error->getLine();
+			$payload['stack'] = $error->getTraceAsString();
+		}
+
+		// Add context
+		$payload = array_merge( $payload, $context );
+
+		return $payload;
 	}
 
 	/**
@@ -115,6 +182,8 @@ class WPMH_Replace_Image_URLs {
 	 */
 	private function delete_job_state() {
 		delete_transient( $this->get_job_state_key() );
+		// Also clear any job locks
+		delete_transient( $this->get_job_state_key() . '_lock' );
 	}
 
 	/**
@@ -126,12 +195,35 @@ class WPMH_Replace_Image_URLs {
 			ob_clean();
 		}
 
+		$last_step = 'init';
+		$context = array(
+			'last_step' => 'init',
+			'action' => 'wpmh_start_replace_job',
+		);
+
 		try {
+			$last_step = 'security_check_permissions';
+			$context['last_step'] = $last_step;
+
 			// Security checks
 			if ( ! current_user_can( 'manage_options' ) ) {
-				wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
+				$error_msg = __( 'Insufficient permissions.', 'webp-media-handler' );
+				$payload = $this->build_error_payload( $error_msg, $context );
+				$this->write_debug_log( $payload );
+				
+				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+					error_log( '[WPMH Replace URLs] Permission denied: ' . $error_msg );
+				}
+
+				wp_send_json_error( array_merge(
+					array( 'message' => $error_msg ),
+					array( 'debug' => $payload, 'no_retry' => true )
+				) );
 				return;
 			}
+
+			$last_step = 'security_check_nonce';
+			$context['last_step'] = $last_step;
 
 			check_ajax_referer( 'wpmh_replace_image_urls', 'nonce' );
 
@@ -151,6 +243,7 @@ class WPMH_Replace_Image_URLs {
 				'current_table' => $tables[0],
 				'last_id' => 0,
 				'last_id_check' => 0, // For infinite loop detection
+				'stuck_count' => 0,
 				'stats' => array(
 					'replaced' => 0,
 					'skipped_external' => 0,
@@ -194,25 +287,63 @@ class WPMH_Replace_Image_URLs {
 			ob_clean();
 		}
 
+		$context = array(
+			'last_step' => 'init',
+			'action' => 'wpmh_reset_replace_job',
+		);
+
 		try {
 			// Security checks
 			if ( ! current_user_can( 'manage_options' ) ) {
-				wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
+				$error_msg = __( 'Insufficient permissions.', 'webp-media-handler' );
+				$payload = $this->build_error_payload( $error_msg, $context );
+				$this->write_debug_log( $payload );
+				wp_send_json_error( array_merge(
+					array( 'message' => $error_msg ),
+					array( 'debug' => $payload, 'no_retry' => true )
+				) );
 				return;
 			}
 
 			check_ajax_referer( 'wpmh_replace_image_urls', 'nonce' );
 
+			// Delete job state and all related transients
 			$this->delete_job_state();
+			
+			// Clear any retry counters or locks
+			$state_key = $this->get_job_state_key();
+			delete_transient( $state_key . '_lock' );
+			delete_transient( $state_key . '_retry_count' );
 
 			wp_send_json_success( array(
-				'message' => __( 'Job reset successfully.', 'webp-media-handler' ),
+				'message' => __( 'Job reset successfully. All state cleared.', 'webp-media-handler' ),
 			) );
 
 		} catch ( Exception $e ) {
-			error_log( '[WPMH Replace URLs] Reset job error: ' . $e->getMessage() );
-			wp_send_json_error( array(
-				'message' => __( 'Failed to reset job: ', 'webp-media-handler' ) . $e->getMessage(),
+			$context['last_step'] = 'exception';
+			$payload = $this->build_error_payload( $e, $context );
+			$this->write_debug_log( $payload );
+
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( '[WPMH Replace URLs] Reset job error: ' . $e->getMessage() );
+			}
+
+			wp_send_json_error( array_merge(
+				array( 'message' => __( 'Failed to reset job: ', 'webp-media-handler' ) . $e->getMessage() ),
+				array( 'debug' => $payload )
+			) );
+		} catch ( Error $e ) {
+			$context['last_step'] = 'fatal_error';
+			$payload = $this->build_error_payload( $e, $context );
+			$this->write_debug_log( $payload );
+
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( '[WPMH Replace URLs] Reset job fatal error: ' . $e->getMessage() );
+			}
+
+			wp_send_json_error( array_merge(
+				array( 'message' => __( 'Fatal error resetting job: ', 'webp-media-handler' ) . $e->getMessage() ),
+				array( 'debug' => $payload )
 			) );
 		}
 	}
@@ -227,49 +358,138 @@ class WPMH_Replace_Image_URLs {
 
 		$start_time = microtime( true );
 		$last_error = '';
+		$last_step = 'init';
+		$context = array(
+			'last_step' => 'init',
+			'action' => 'wpmh_run_replace_batch',
+		);
 
 		try {
+			$last_step = 'security_check_permissions';
+			$context['last_step'] = $last_step;
+
 			// Security checks
 			if ( ! current_user_can( 'manage_options' ) ) {
-				wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
-				return;
-			}
+				$error_msg = __( 'Insufficient permissions.', 'webp-media-handler' );
+				$payload = $this->build_error_payload( $error_msg, $context );
+				$this->write_debug_log( $payload );
 
-			check_ajax_referer( 'wpmh_replace_image_urls', 'nonce' );
+				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+					error_log( '[WPMH Replace URLs] Permission denied in batch: ' . $error_msg );
+				}
 
-			// Get job state
-			$state = $this->get_job_state();
-			if ( false === $state ) {
-				wp_send_json_error( array(
-					'message' => __( 'Job state not found. Please start a new job.', 'webp-media-handler' ),
+				wp_send_json_error( array_merge(
+					array( 'message' => $error_msg ),
+					array( 'debug' => $payload, 'no_retry' => true )
 				) );
 				return;
 			}
 
+			$last_step = 'security_check_nonce';
+			$context['last_step'] = $last_step;
+
+			check_ajax_referer( 'wpmh_replace_image_urls', 'nonce' );
+
+			$last_step = 'get_job_state';
+			$context['last_step'] = $last_step;
+
+			// Get job state
+			$state = $this->get_job_state();
+			if ( false === $state ) {
+				$error_msg = __( 'Job state not found. Please start a new job.', 'webp-media-handler' );
+				$payload = $this->build_error_payload( $error_msg, $context );
+				$this->write_debug_log( $payload );
+
+				wp_send_json_error( array_merge(
+					array( 'message' => $error_msg ),
+					array( 'debug' => $payload, 'no_retry' => true )
+				) );
+				return;
+			}
+
+			$last_step = 'validate_state';
+			$context['last_step'] = $last_step;
+
+			// Validate state structure
+			if ( ! isset( $state['tables'] ) || ! is_array( $state['tables'] ) ) {
+				$error_msg = __( 'Invalid job state: missing tables array.', 'webp-media-handler' );
+				$payload = $this->build_error_payload( $error_msg, array_merge( $context, array( 'state_keys' => array_keys( $state ) ) ) );
+				$this->write_debug_log( $payload );
+
+				$this->delete_job_state();
+				wp_send_json_error( array_merge(
+					array( 'message' => $error_msg ),
+					array( 'debug' => $payload, 'no_retry' => true )
+				) );
+				return;
+			}
+
+			// Ensure required state fields exist with defaults
+			$state['current_table_index'] = isset( $state['current_table_index'] ) ? (int) $state['current_table_index'] : 0;
+			$state['last_id'] = isset( $state['last_id'] ) ? (int) $state['last_id'] : 0;
+			$state['last_id_check'] = isset( $state['last_id_check'] ) ? (int) $state['last_id_check'] : 0;
+			$state['stuck_count'] = isset( $state['stuck_count'] ) ? (int) $state['stuck_count'] : 0;
+			$state['current_table'] = isset( $state['current_table'] ) ? $state['current_table'] : ( isset( $state['tables'][0] ) ? $state['tables'][0] : 'posts' );
+
+			// Validate batch_size
+			$this->batch_size = max( 10, min( 500, $this->batch_size ) );
+
+			$context['current_table'] = $state['current_table'];
+			$context['current_table_index'] = $state['current_table_index'];
+			$context['last_id'] = $state['last_id'];
+			$context['batch_size'] = $this->batch_size;
+
+			$last_step = 'check_cursor_stuck';
+			$context['last_step'] = $last_step;
+
 			// Check for infinite loop (cursor not advancing)
 			if ( $state['last_id'] === $state['last_id_check'] && $state['last_id'] > 0 ) {
 				// Check if we've been stuck for more than 2 batches (safety check)
-				if ( isset( $state['stuck_count'] ) && $state['stuck_count'] >= 2 ) {
+				if ( $state['stuck_count'] >= 2 ) {
+					$error_msg = __( 'Cursor did not advance; possible query issue. Stopping to prevent infinite loop.', 'webp-media-handler' );
+					$payload = $this->build_error_payload( $error_msg, array_merge( $context, array(
+						'cursor_stuck' => true,
+						'last_id' => $state['last_id'],
+						'last_id_check' => $state['last_id_check'],
+						'stuck_count' => $state['stuck_count'],
+					) ) );
+					$this->write_debug_log( $payload );
+
 					$this->delete_job_state();
-					wp_send_json_error( array(
-						'message' => __( 'Cursor did not advance; possible query issue. Stopping to prevent infinite loop.', 'webp-media-handler' ),
+					wp_send_json_error( array_merge(
+						array( 'message' => $error_msg ),
+						array( 'debug' => $payload, 'no_retry' => true )
 					) );
 					return;
 				}
-				$state['stuck_count'] = isset( $state['stuck_count'] ) ? $state['stuck_count'] + 1 : 1;
+				$state['stuck_count']++;
 			} else {
 				$state['stuck_count'] = 0;
 				$state['last_id_check'] = $state['last_id'];
 			}
 
+			$last_step = 'validate_method';
+			$context['last_step'] = $last_step;
+
 			// Process current table batch
 			$method_name = 'process_' . $state['current_table'];
 			if ( ! method_exists( $this, $method_name ) ) {
-				wp_send_json_error( array(
-					'message' => sprintf( __( 'Unknown table: %s', 'webp-media-handler' ), $state['current_table'] ),
+				$error_msg = sprintf( __( 'Unknown table: %s', 'webp-media-handler' ), $state['current_table'] );
+				$payload = $this->build_error_payload( $error_msg, array_merge( $context, array(
+					'method_name' => $method_name,
+					'available_methods' => array_filter( get_class_methods( $this ), function( $m ) { return strpos( $m, 'process_' ) === 0; } ),
+				) ) );
+				$this->write_debug_log( $payload );
+
+				wp_send_json_error( array_merge(
+					array( 'message' => $error_msg ),
+					array( 'debug' => $payload, 'no_retry' => true )
 				) );
 				return;
 			}
+
+			$last_step = 'restore_audit_log';
+			$context['last_step'] = $last_step;
 
 			// Restore audit log from state
 			if ( ! empty( $state['audit_log'] ) ) {
@@ -278,7 +498,27 @@ class WPMH_Replace_Image_URLs {
 				$this->audit_log = array();
 			}
 
+			$last_step = 'call_process_method';
+			$context['last_step'] = $last_step;
+			$context['method_name'] = $method_name;
+
 			$batch_result = call_user_func( array( $this, $method_name ), $state );
+
+			// Validate batch_result structure
+			if ( ! is_array( $batch_result ) || ! isset( $batch_result['state'] ) ) {
+				$error_msg = __( 'Invalid batch result: missing state.', 'webp-media-handler' );
+				$payload = $this->build_error_payload( $error_msg, array_merge( $context, array(
+					'batch_result_type' => gettype( $batch_result ),
+					'batch_result_keys' => is_array( $batch_result ) ? array_keys( $batch_result ) : 'not_array',
+				) ) );
+				$this->write_debug_log( $payload );
+
+				wp_send_json_error( array_merge(
+					array( 'message' => $error_msg ),
+					array( 'debug' => $payload, 'no_retry' => false )
+				) );
+				return;
+			}
 
 			// Save audit log back to state
 			$batch_result['state']['audit_log'] = $this->audit_log;
@@ -355,11 +595,40 @@ class WPMH_Replace_Image_URLs {
 				'continue' => true,
 			) );
 
+			$last_step = 'success';
+			$context['last_step'] = $last_step;
+
 		} catch ( Exception $e ) {
-			error_log( '[WPMH Replace URLs] Batch error: ' . $e->getMessage() );
-			wp_send_json_error( array(
-				'message' => __( 'Batch processing error: ', 'webp-media-handler' ) . $e->getMessage(),
-				'last_error' => $e->getMessage(),
+			$last_step = 'exception_' . $last_step;
+			$context['last_step'] = $last_step;
+			$context['exception_class'] = get_class( $e );
+
+			$payload = $this->build_error_payload( $e, $context );
+			$this->write_debug_log( $payload );
+
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( '[WPMH Replace URLs] Batch error: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine() );
+			}
+
+			wp_send_json_error( array_merge(
+				array( 'message' => __( 'Batch processing error: ', 'webp-media-handler' ) . $e->getMessage() ),
+				array( 'debug' => $payload, 'no_retry' => false )
+			) );
+		} catch ( Error $e ) {
+			$last_step = 'fatal_error_' . $last_step;
+			$context['last_step'] = $last_step;
+			$context['error_class'] = get_class( $e );
+
+			$payload = $this->build_error_payload( $e, $context );
+			$this->write_debug_log( $payload );
+
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( '[WPMH Replace URLs] Batch fatal error: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine() );
+			}
+
+			wp_send_json_error( array_merge(
+				array( 'message' => __( 'Fatal error in batch: ', 'webp-media-handler' ) . $e->getMessage() ),
+				array( 'debug' => $payload, 'no_retry' => false )
 			) );
 		}
 	}

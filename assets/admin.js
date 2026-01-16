@@ -239,14 +239,25 @@
 		 * Run replace URLs batch (with retries)
 		 */
 		runReplaceBatch: function(action, nonceAction, retryCount) {
+			retryCount = retryCount || 0;
+			
 			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
 			var statusId = '#wpmh-status-' + action;
 			var $status = $(statusId);
 
 			// Max retries
-			if (retryCount >= 2) {
-							$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error + ' Maximum retries reached. Please reset and try again.');
+			if (retryCount >= 3) {
+				var errorMsg = wpmhAdmin.strings.error + ' Maximum retries reached. Please reset and try again.';
+				if ($status.data('last-error')) {
+					errorMsg = $status.data('last-error');
+				}
+				$status.removeClass('info success').addClass('show error').text(errorMsg);
 				$button.prop('disabled', false);
+				
+				// Show debug info if available
+				if ($status.data('last-debug')) {
+					WPMHAdmin.showDebugInfo($status, $status.data('last-debug'));
+				}
 				return;
 			}
 
@@ -262,6 +273,9 @@
 				timeout: 30000, // 30 second timeout
 				success: function(response) {
 					if (response.success) {
+						// Clear any stored error data
+						$status.removeData('last-error').removeData('last-debug');
+						
 						// Update status
 						var message = response.data.message;
 						if (response.data.processed !== undefined && response.data.total !== undefined) {
@@ -302,33 +316,104 @@
 							}
 						}
 					} else {
-						// Error - retry
-						WPMHAdmin.handleReplaceError($status, $button, response.data.message || wpmhAdmin.strings.error, retryCount, action, nonceAction);
+						// Store error info for potential display
+						var errorMsg = response.data.message || wpmhAdmin.strings.error;
+						$status.data('last-error', errorMsg);
+						if (response.data.debug) {
+							$status.data('last-debug', response.data.debug);
+						}
+						
+						// Check if we should NOT retry (validation errors)
+						var noRetry = response.data.no_retry === true;
+						
+						if (noRetry) {
+							// Don't retry on validation errors - show error immediately
+							$status.removeClass('info success').addClass('show error').text(errorMsg);
+							$button.prop('disabled', false);
+							
+							// Show debug info if available
+							if (response.data.debug) {
+								WPMHAdmin.showDebugInfo($status, response.data.debug);
+							}
+							
+							// Special handling for permission/nonce errors
+							if (errorMsg.indexOf('permission') !== -1 || errorMsg.indexOf('nonce') !== -1 || errorMsg.indexOf('security') !== -1) {
+								errorMsg += ' Please refresh the page and try again.';
+								$status.text(errorMsg);
+							}
+						} else {
+							// Retry for transient errors
+							WPMHAdmin.handleReplaceError($status, $button, errorMsg, retryCount, action, nonceAction, response.data.debug);
+						}
 					}
 				},
 				error: function(xhr, status, error) {
-					WPMHAdmin.handleReplaceError($status, $button, error, retryCount, action, nonceAction);
+					var errorMsg = error || 'Network error';
+					$status.data('last-error', errorMsg);
+					
+					// Try to parse response for debug info
+					try {
+						var response = xhr.responseJSON;
+						if (response && response.data && response.data.debug) {
+							$status.data('last-debug', response.data.debug);
+						}
+					} catch(e) {
+						// Ignore parse errors
+					}
+					
+					WPMHAdmin.handleReplaceError($status, $button, errorMsg, retryCount, action, nonceAction);
 				}
 			});
 		},
 
 		/**
-		 * Handle replace job errors with retry
+		 * Handle replace job errors with retry (with exponential backoff)
 		 */
-		handleReplaceError: function($status, $button, error, retryCount, action, nonceAction) {
+		handleReplaceError: function($status, $button, error, retryCount, action, nonceAction, debugInfo) {
 			retryCount = retryCount || 0;
 			
-			if (retryCount < 2) {
-				// Retry
-				$status.removeClass('success').addClass('info').text(wpmhAdmin.strings.processing + ' (Retry ' + (retryCount + 1) + '/2)');
+			// Calculate backoff delay: 500ms, 1500ms, 3000ms
+			var backoffDelays = [500, 1500, 3000];
+			var delay = backoffDelays[Math.min(retryCount, backoffDelays.length - 1)];
+			
+			if (retryCount < 3) {
+				// Retry with backoff
+				$status.removeClass('success').addClass('info').text(wpmhAdmin.strings.processing + ' (Retry ' + (retryCount + 1) + '/3)');
 				setTimeout(function() {
 					WPMHAdmin.runReplaceBatch(action, nonceAction, retryCount + 1);
-				}, 1000);
+				}, delay);
 			} else {
 				// Max retries reached
-								$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error + ': ' + error + ' Please reset and try again.');
+				var errorMsg = wpmhAdmin.strings.error + ': ' + error + ' Please reset and try again.';
+				$status.removeClass('info success').addClass('show error').text(errorMsg);
 				$button.prop('disabled', false);
+				
+				// Show debug info if available
+				if (debugInfo || $status.data('last-debug')) {
+					WPMHAdmin.showDebugInfo($status, debugInfo || $status.data('last-debug'));
+				}
 			}
+		},
+
+		/**
+		 * Show debug information in UI
+		 */
+		showDebugInfo: function($status, debugData) {
+			if (!$status.length || !debugData) {
+				return;
+			}
+			
+			// Remove existing debug details if any
+			$status.siblings('.wpmh-debug-info').remove();
+			
+			var debugHtml = '<details class="wpmh-debug-info" style="margin-top: 10px; padding: 10px; background: #f0f0f0; border: 1px solid #ccc; font-family: monospace; font-size: 11px;">';
+			debugHtml += '<summary style="cursor: pointer; font-weight: bold;">Debug Information (Click to expand)</summary>';
+			debugHtml += '<pre style="max-height: 400px; overflow: auto; margin-top: 10px;">';
+			debugHtml += JSON.stringify(debugData, null, 2);
+			debugHtml += '</pre>';
+			debugHtml += '</details>';
+			
+			$status.after(debugHtml);
 		},
 
 		/**
