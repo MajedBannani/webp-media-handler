@@ -144,8 +144,6 @@ class WPMH_Replace_Image_URLs {
 		add_action( 'wp_ajax_wpmh_start_replace_job', array( $this, 'handle_start_job' ) );
 		add_action( 'wp_ajax_wpmh_run_replace_batch', array( $this, 'handle_run_batch' ) );
 		add_action( 'wp_ajax_wpmh_reset_replace_job', array( $this, 'handle_reset_job' ) );
-		add_action( 'wp_ajax_wpmh_rollback_replace', array( $this, 'handle_rollback' ) );
-		add_action( 'wp_ajax_wpmh_view_replace_log', array( $this, 'handle_view_log' ) );
 	}
 
 	/**
@@ -227,8 +225,8 @@ class WPMH_Replace_Image_URLs {
 
 			check_ajax_referer( 'wpmh_replace_image_urls', 'nonce' );
 
-			// Get dry-run flag
-			$dry_run = isset( $_POST['dry_run'] ) && '1' === $_POST['dry_run'];
+			// Dry-run is disabled - always perform actual replacement
+			$dry_run = false;
 
 			// Initialize job state - process theme_mods separately from options for special handling
 			$tables = array( 'posts', 'theme_mods', 'options', 'postmeta', 'termmeta', 'usermeta', 'terms', 'term_taxonomy' );

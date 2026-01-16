@@ -256,7 +256,6 @@ class WPMH_Admin {
 	private function render_action_card( $action_key, $title, $description, $nonce_action, $button_text ) {
 		$log = $this->settings->get_action_log( $action_key );
 		$last_run = $log ? $log['timestamp'] : '';
-		$show_dry_run = ( 'replace_urls' === $action_key );
 		?>
 		<div class="wpmh-feature-card wpmh-action-card">
 			<div class="wpmh-feature-header">
@@ -271,17 +270,6 @@ class WPMH_Admin {
 					<?php echo esc_html( $last_run ); ?>
 				</div>
 			<?php endif; ?>
-			<?php if ( $show_dry_run ) : ?>
-				<div class="wpmh-dry-run-option" style="margin: 10px 0;">
-					<label>
-						<input type="checkbox" id="wpmh-dry-run-replace-urls" value="1" />
-						<?php esc_html_e( 'Dry run (no changes)', 'webp-media-handler' ); ?>
-					</label>
-					<p class="description" style="margin: 5px 0 0 0; font-style: italic;">
-						<?php esc_html_e( 'Preview changes without modifying the database. Shows a detailed report of what would be replaced.', 'webp-media-handler' ); ?>
-					</p>
-				</div>
-			<?php endif; ?>
 			<div class="wpmh-feature-actions">
 				<button type="button" 
 				        class="button button-primary wpmh-action-button" 
@@ -292,12 +280,6 @@ class WPMH_Admin {
 				<?php if ( 'replace_urls' === $action_key ) : ?>
 					<a href="#" id="wpmh-reset-replace-job" class="button" style="display: none; margin-left: 10px;">
 						<?php esc_html_e( 'Reset Job', 'webp-media-handler' ); ?>
-					</a>
-					<a href="#" id="wpmh-view-replace-log" class="button" style="margin-left: 10px;">
-						<?php esc_html_e( 'View Last Run Log', 'webp-media-handler' ); ?>
-					</a>
-					<a href="#" id="wpmh-rollback-replace" class="button button-secondary" style="margin-left: 10px;">
-						<?php esc_html_e( 'Rollback Last Run', 'webp-media-handler' ); ?>
 					</a>
 				<?php endif; ?>
 				<div class="wpmh-action-status" id="wpmh-status-<?php echo esc_attr( $action_key ); ?>"></div>
