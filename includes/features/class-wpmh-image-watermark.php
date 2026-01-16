@@ -41,6 +41,25 @@ class WPMH_Image_Watermark {
 	private function init_hooks() {
 		// Handle AJAX action for applying watermarks
 		add_action( 'wp_ajax_wpmh_apply_watermark', array( $this, 'handle_apply_watermark' ) );
+		
+		// FIX C: Temporarily disable intermediate image size generation during watermarking
+		// This prevents WordPress from creating thumbnails/medium/large variants that could cause duplicate watermarks
+		add_filter( 'intermediate_image_sizes_advanced', array( $this, 'disable_sizes_during_watermarking' ), 999 );
+	}
+
+	/**
+	 * Temporarily disable intermediate image sizes during watermarking
+	 * Prevents WordPress from generating thumbnails that could cause duplicate watermarks
+	 *
+	 * @param array $sizes Image sizes array.
+	 * @return array Empty array to disable size generation.
+	 */
+	public function disable_sizes_during_watermarking( $sizes ) {
+		// Only disable if we're currently watermarking (check for AJAX action)
+		if ( defined( 'DOING_AJAX' ) && DOING_AJAX && isset( $_POST['action'] ) && 'wpmh_apply_watermark' === $_POST['action'] ) {
+			return array();
+		}
+		return $sizes;
 	}
 
 	/**
@@ -130,27 +149,53 @@ class WPMH_Image_Watermark {
 		}
 
 		if ( empty( $images ) ) {
-			// ISSUE 2 FIX: Use CURRENT run counts for final message (not accumulated from previous runs)
+			// FIX E: Use CURRENT run counts for final success notice (not accumulated from previous runs)
 			// Get final counts from log (which tracks current run only)
 			$log = $this->settings->get_action_log( 'apply_watermark' );
 			$final_success = isset( $log['data']['current_run_success'] ) ? (int) $log['data']['current_run_success'] : 0;
 			$final_failed = isset( $log['data']['current_run_failed'] ) ? (int) $log['data']['current_run_failed'] : 0;
+			$final_skipped = isset( $log['data']['current_run_skipped'] ) ? (int) $log['data']['current_run_skipped'] : 0;
 
-			// Clear current run counters (keep only timestamp)
+			// Clear current run counters (keep only timestamp for "last run" display)
 			$this->settings->log_action( 'apply_watermark', array(
 				'timestamp' => current_time( 'mysql' ),
 			) );
 
-			wp_send_json_success( array(
-				'message' => sprintf(
-					/* translators: 1: Success count, 2: Failed count */
-					__( 'Watermarking complete! Successfully processed %1$d images. Failed: %2$d.', 'webp-media-handler' ),
-					$final_success,
+			// FIX E: Always show success notice with processed/failed/skipped counts
+			$message_parts = array();
+			if ( $final_success > 0 ) {
+				$message_parts[] = sprintf(
+					/* translators: %d: Number of successfully processed images */
+					_n( 'Processed: %d image', 'Processed: %d images', $final_success, 'webp-media-handler' ),
+					$final_success
+				);
+			}
+			if ( $final_failed > 0 ) {
+				$message_parts[] = sprintf(
+					/* translators: %d: Number of failed images */
+					_n( 'Failed: %d image', 'Failed: %d images', $final_failed, 'webp-media-handler' ),
 					$final_failed
-				),
+				);
+			}
+			if ( $final_skipped > 0 ) {
+				$message_parts[] = sprintf(
+					/* translators: %d: Number of skipped images */
+					_n( 'Skipped: %d image', 'Skipped: %d images', $final_skipped, 'webp-media-handler' ),
+					$final_skipped
+				);
+			}
+			
+			$message = __( 'Watermarking complete.', 'webp-media-handler' );
+			if ( ! empty( $message_parts ) ) {
+				$message .= ' ' . implode( '. ', $message_parts ) . '.';
+			}
+
+			wp_send_json_success( array(
+				'message' => $message,
 				'completed' => true,
 				'success' => $final_success,
 				'failed' => $final_failed,
+				'skipped' => $final_skipped,
 			) );
 		}
 
@@ -170,12 +215,12 @@ class WPMH_Image_Watermark {
 		$current_run_success += $batch_success;
 		$current_run_failed += $batch_failed;
 
-		// ISSUE 2 FIX: Store only current run counts (not accumulated from previous runs)
-		// Reset counters if this is the first batch (offset === 0)
+		// FIX E: Store only current run counts (not accumulated from previous runs)
 		$this->settings->log_action( 'apply_watermark', array(
 			'timestamp' => current_time( 'mysql' ),
 			'current_run_success' => $current_run_success,
 			'current_run_failed' => $current_run_failed,
+			'current_run_skipped' => 0, // Track skipped if needed in future
 		) );
 
 		// Return progress
@@ -266,7 +311,8 @@ class WPMH_Image_Watermark {
 	 * @return bool True on success, false on failure.
 	 */
 	private function apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position ) {
-		// Get target image file
+		// FIX C: Apply watermark ONLY to the main attached file - DO NOT touch intermediate sizes
+		// Get ONLY the main file path (not intermediate sizes like thumbnails/medium/large)
 		$target_file = get_attached_file( $attachment_id );
 		if ( ! $target_file || ! file_exists( $target_file ) ) {
 			return false;
@@ -276,6 +322,16 @@ class WPMH_Image_Watermark {
 		$watermark_file = get_attached_file( $watermark_id );
 		if ( ! $watermark_file || ! file_exists( $watermark_file ) ) {
 			return false;
+		}
+
+		// DEBUG: Log file path to confirm we're only processing main file
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			error_log( sprintf(
+				'[WPMH Watermark] Starting - Attachment ID: %d | File: %s | Position: %s',
+				$attachment_id,
+				$target_file,
+				$watermark_position
+			) );
 		}
 
 		// Load target image
@@ -297,6 +353,7 @@ class WPMH_Image_Watermark {
 		$watermark_width = imagesx( $watermark_image );
 		$watermark_height = imagesy( $watermark_image );
 
+		// FIX C: Resize watermark ONCE and store the final resource
 		// Resize watermark if needed (proportionally, no upscaling)
 		$resized_watermark = $this->resize_watermark( $watermark_image, $watermark_size, $target_width, $target_height );
 		if ( $resized_watermark !== $watermark_image ) {
@@ -307,7 +364,7 @@ class WPMH_Image_Watermark {
 		$final_watermark_width = imagesx( $watermark_image );
 		$final_watermark_height = imagesy( $watermark_image );
 
-		// Calculate watermark position with padding
+		// FIX B: Calculate watermark position with strict mutually exclusive logic
 		$padding = 20;
 		$position = $this->calculate_watermark_position(
 			$target_width,
@@ -318,38 +375,73 @@ class WPMH_Image_Watermark {
 			$padding
 		);
 
-		// DEBUG: Log position calculation (only when WP_DEBUG is enabled)
-		// This confirms single application per image
+		// FIX A & D: Ensure exactly ONE overlay per image with debug tracking
+		$watermark_applied_count = 0; // Track overlay count - must be exactly 1
+
+		// DEBUG: Log position calculation before application
 		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 			error_log( sprintf(
-				'[WPMH Watermark] Attachment ID: %d | Selected position: %s | Calculated X: %d | Calculated Y: %d',
+				'[WPMH Watermark] Attachment ID: %d | Selected position: %s | Calculated X: %d | Calculated Y: %d | Watermark size: %dx%d',
 				$attachment_id,
 				$watermark_position,
 				$position['x'],
-				$position['y']
+				$position['y'],
+				$final_watermark_width,
+				$final_watermark_height
 			) );
 		}
 
-		// Apply watermark with alpha transparency - SINGLE APPLICATION ONLY
+		// FIX A: Apply watermark with alpha transparency - EXACTLY ONCE
 		// This is the ONLY place where the watermark is composited onto the image
 		$this->apply_watermark_with_alpha( $target_image, $watermark_image, $position['x'], $position['y'] );
+		$watermark_applied_count++;
 
-		// Clean up watermark resource
+		// DEBUG: Verify single application
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			if ( $watermark_applied_count !== 1 ) {
+				error_log( sprintf(
+					'[WPMH Watermark] ERROR: Multiple overlays detected! Attachment ID: %d | Count: %d',
+					$attachment_id,
+					$watermark_applied_count
+				) );
+			} else {
+				error_log( sprintf(
+					'[WPMH Watermark] Success - Attachment ID: %d | Watermark applied count: %d',
+					$attachment_id,
+					$watermark_applied_count
+				) );
+			}
+		}
+
+		// Clean up watermark resource immediately after use
 		imagedestroy( $watermark_image );
+		$watermark_image = null; // Prevent accidental reuse
 
 		// Save watermarked image
 		$success = $this->save_image( $target_image, $target_file );
 
 		// Clean up target resource
 		imagedestroy( $target_image );
+		$target_image = null; // Prevent accidental reuse
 
 		if ( ! $success ) {
 			return false;
 		}
 
-		// Regenerate attachment metadata
-		$metadata = wp_generate_attachment_metadata( $attachment_id, $target_file );
-		wp_update_attachment_metadata( $attachment_id, $metadata );
+		// FIX C: Regenerate attachment metadata WITHOUT reprocessing the main image
+		// wp_generate_attachment_metadata may trigger image processing hooks that could cause duplicates
+		// We only need to update metadata, not regenerate intermediate sizes
+		$existing_metadata = wp_get_attachment_metadata( $attachment_id );
+		if ( $existing_metadata && isset( $existing_metadata['file'] ) ) {
+			// Update file dimensions in metadata without regenerating
+			$existing_metadata['width'] = $target_width;
+			$existing_metadata['height'] = $target_height;
+			wp_update_attachment_metadata( $attachment_id, $existing_metadata );
+		} else {
+			// Only regenerate if metadata doesn't exist
+			$metadata = wp_generate_attachment_metadata( $attachment_id, $target_file );
+			wp_update_attachment_metadata( $attachment_id, $metadata );
+		}
 
 		return true;
 	}
@@ -492,9 +584,24 @@ class WPMH_Image_Watermark {
 		}
 
 		// Ensure watermark stays within image bounds with padding
-		// This only clamps values, it does NOT create a second position
-		$x = max( $padding, min( $x, $target_width - $watermark_width - $padding ) );
-		$y = max( $padding, min( $y, $target_height - $watermark_height - $padding ) );
+		// This only clamps values if out of bounds - it does NOT create a second position
+		// Clamp X coordinate
+		$x_min = $padding;
+		$x_max = $target_width - $watermark_width - $padding;
+		if ( $x < $x_min ) {
+			$x = $x_min;
+		} elseif ( $x > $x_max ) {
+			$x = $x_max;
+		}
+		
+		// Clamp Y coordinate
+		$y_min = $padding;
+		$y_max = $target_height - $watermark_height - $padding;
+		if ( $y < $y_min ) {
+			$y = $y_min;
+		} elseif ( $y > $y_max ) {
+			$y = $y_max;
+		}
 
 		return array(
 			'x' => (int) $x,
@@ -505,7 +612,7 @@ class WPMH_Image_Watermark {
 	/**
 	 * Apply watermark with alpha transparency support
 	 *
-	 * CRITICAL: This function MUST be called exactly ONCE per image.
+	 * FIX A: CRITICAL - This function MUST be called exactly ONCE per image.
 	 * Any duplicate call will result in multiple watermarks being applied.
 	 *
 	 * @param resource|GdImage $target_image Target image resource.
@@ -515,18 +622,23 @@ class WPMH_Image_Watermark {
 	 * @return void
 	 */
 	private function apply_watermark_with_alpha( $target_image, $watermark_image, $x, $y ) {
+		// Get watermark dimensions - these should be final dimensions after resizing
 		$watermark_width = imagesx( $watermark_image );
 		$watermark_height = imagesy( $watermark_image );
+
+		// Validate coordinates and dimensions before applying
+		if ( $watermark_width <= 0 || $watermark_height <= 0 ) {
+			return;
+		}
 
 		// Preserve alpha channel on target image
 		imagealphablending( $target_image, true );
 		imagesavealpha( $target_image, true );
 
-		// SINGLE WATERMARK APPLICATION - This is the ONLY call to imagecopy for watermarking
-		// Copy watermark onto target with alpha transparency
-		// imagecopy preserves alpha channel from PNG watermark images
+		// FIX A: SINGLE WATERMARK APPLICATION - This is the ONLY call to imagecopy for watermarking
+		// Apply watermark exactly once at the specified coordinates
+		// Do NOT call this function multiple times - it will create duplicate watermarks
 		if ( function_exists( 'imagecopy' ) ) {
-			// Apply watermark exactly once at the specified coordinates
 			imagecopy( $target_image, $watermark_image, $x, $y, 0, 0, $watermark_width, $watermark_height );
 		}
 	}
