@@ -77,16 +77,16 @@ class WPMH_GitHub_Updater {
 	/**
 	 * Check for plugin updates
 	 *
-	 * SAFE TRANSIENT HANDLING: Accepts $transient which can be FALSE.
-	 * If not object, returns $transient immediately without modification.
-	 *
 	 * @param object|false $transient Update transient object or false.
 	 * @return object|false Modified transient object or false.
 	 */
 	public function check_for_update( $transient ) {
-		// Defensive guard: WordPress may pass false if transient doesn't exist
-		// MUST return $transient immediately if not object
+		// REQUIREMENT 1: MUST immediately return if not object or checked is empty
 		if ( ! is_object( $transient ) ) {
+			return $transient;
+		}
+
+		if ( empty( $transient->checked ) ) {
 			return $transient;
 		}
 
@@ -109,26 +109,20 @@ class WPMH_GitHub_Updater {
 			return $transient;
 		}
 
-		// HARD VERSION NORMALIZATION
-		// Strip leading "v" from GitHub tag, trim whitespace, cast to plain string
-		$remote_version = $this->normalize_version( $release_data->tag_name );
-		$local_version  = $this->normalize_version( $this->current_version );
+		// REQUIREMENT 2: Normalize versions FIRST, before ANY logic
+		$remote_version = ltrim( trim( $release_data->tag_name ), 'v' );
+		$local_version  = trim( $this->current_version );
 
-		// STRICT VERSION CHECK - Only show update if remote > local
-		// version_compare returns: -1 if local < remote, 0 if equal, 1 if local > remote
-		$version_comparison = version_compare( $local_version, $remote_version );
-		
-		// If versions are equal or local is greater, DO NOT add update
-		if ( $version_comparison >= 0 ) {
-			// Remove any existing update entry for this plugin (in case it was added before)
-			if ( isset( $transient->response ) && is_array( $transient->response ) ) {
-				unset( $transient->response[ $this->plugin_basename ] );
-			}
+		// REQUIREMENT 3: HARD STOP CONDITION - If remote <= local, return immediately
+		if ( version_compare( $remote_version, $local_version, '<=' ) ) {
+			// DO NOT create update object
+			// DO NOT touch $transient->response
+			// RETURN $transient immediately
 			return $transient;
 		}
 
-		// Only proceed if remote version is strictly greater (version_comparison < 0)
-		// Prepare update data
+		// REQUIREMENT 4: Only if remote_version > local_version
+		// Build update object
 		if ( ! isset( $transient->response ) ) {
 			$transient->response = array();
 		}
