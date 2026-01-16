@@ -116,8 +116,8 @@ class WPMH_Replace_Image_URLs {
 			// Get dry-run flag
 			$dry_run = isset( $_POST['dry_run'] ) && '1' === $_POST['dry_run'];
 
-			// Initialize job state
-			$tables = array( 'posts', 'postmeta', 'options', 'termmeta', 'usermeta', 'terms', 'term_taxonomy' );
+			// Initialize job state - process theme_mods separately from options for special handling
+			$tables = array( 'posts', 'theme_mods', 'options', 'postmeta', 'termmeta', 'usermeta', 'terms', 'term_taxonomy' );
 
 			$state = array(
 				'dry_run' => $dry_run,
@@ -349,7 +349,7 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Build completion message
+	 * Build completion message with detailed reporting
 	 *
 	 * @param array $state Job state.
 	 * @return string Message.
@@ -358,30 +358,99 @@ class WPMH_Replace_Image_URLs {
 		$mode = $state['dry_run'] ? __( 'Dry run completed', 'webp-media-handler' ) : __( 'URL replacement complete', 'webp-media-handler' );
 		$message = $mode . '! ';
 
-		// Table breakdown
-		$table_messages = array();
-		foreach ( $state['stats']['tables'] as $table => $stats ) {
-			if ( $stats['scanned'] > 0 ) {
-				$table_messages[] = sprintf(
-					/* translators: 1: Table name, 2: Scanned count, 3: Updated count */
-					__( '%1$s: %2$d scanned, %3$d updated', 'webp-media-handler' ),
-					$table,
-					$stats['scanned'],
-					$stats['updated']
+		// Detailed per-scope reporting
+		$report_parts = array();
+
+		// Posts
+		if ( isset( $state['stats']['tables']['posts'] ) && $state['stats']['tables']['posts']['scanned'] > 0 ) {
+			$posts_stats = $state['stats']['tables']['posts'];
+			$report_parts[] = sprintf(
+				/* translators: 1: Updated count, 2: Replacements count */
+				__( 'Posts: %1$d updated, %2$d replacements', 'webp-media-handler' ),
+				$posts_stats['updated'],
+				$state['stats']['replaced']
+			);
+		}
+
+		// Theme mods
+		if ( isset( $state['stats']['tables']['theme_mods'] ) && $state['stats']['tables']['theme_mods']['updated'] > 0 ) {
+			$report_parts[] = sprintf(
+				/* translators: %d: Updated count */
+				__( 'Theme mods: %d updated', 'webp-media-handler' ),
+				$state['stats']['tables']['theme_mods']['updated']
+			);
+		}
+
+		// Options
+		if ( isset( $state['stats']['tables']['options'] ) && $state['stats']['tables']['options']['updated'] > 0 ) {
+			$report_parts[] = sprintf(
+				/* translators: %d: Updated count */
+				__( 'Options: %d updated', 'webp-media-handler' ),
+				$state['stats']['tables']['options']['updated']
+			);
+		}
+
+		// Postmeta
+		if ( isset( $state['stats']['tables']['postmeta'] ) && $state['stats']['tables']['postmeta']['updated'] > 0 ) {
+			$report_parts[] = sprintf(
+				/* translators: %d: Updated count */
+				__( 'Postmeta: %d updated', 'webp-media-handler' ),
+				$state['stats']['tables']['postmeta']['updated']
+			);
+		}
+
+		// Usermeta
+		if ( isset( $state['stats']['tables']['usermeta'] ) && $state['stats']['tables']['usermeta']['updated'] > 0 ) {
+			$report_parts[] = sprintf(
+				/* translators: %d: Updated count */
+				__( 'Usermeta: %d updated', 'webp-media-handler' ),
+				$state['stats']['tables']['usermeta']['updated']
+			);
+		}
+
+		// Termmeta
+		if ( isset( $state['stats']['tables']['termmeta'] ) && $state['stats']['tables']['termmeta']['updated'] > 0 ) {
+			$report_parts[] = sprintf(
+				/* translators: %d: Updated count */
+				__( 'Termmeta: %d updated', 'webp-media-handler' ),
+				$state['stats']['tables']['termmeta']['updated']
+			);
+		}
+
+		// Terms/Term taxonomy
+		if ( isset( $state['stats']['tables']['terms'] ) && $state['stats']['tables']['terms']['updated'] > 0 ) {
+			$report_parts[] = sprintf(
+				/* translators: %d: Updated count */
+				__( 'Terms: %d updated', 'webp-media-handler' ),
+				$state['stats']['tables']['terms']['updated']
+			);
+		}
+
+		if ( ! empty( $report_parts ) ) {
+			$message .= implode( '; ', $report_parts ) . '. ';
+		}
+
+		// Skip counts
+		if ( $state['stats']['skipped_external'] > 0 || $state['stats']['skipped_no_webp'] > 0 ) {
+			$skip_parts = array();
+			if ( $state['stats']['skipped_external'] > 0 ) {
+				$skip_parts[] = sprintf(
+					/* translators: %d: Skipped count */
+					__( '%d external URLs skipped', 'webp-media-handler' ),
+					$state['stats']['skipped_external']
 				);
 			}
+			if ( $state['stats']['skipped_no_webp'] > 0 ) {
+				$skip_parts[] = sprintf(
+					/* translators: %d: Skipped count */
+					__( '%d URLs skipped (no WebP file)', 'webp-media-handler' ),
+					$state['stats']['skipped_no_webp']
+				);
+			}
+			if ( ! empty( $skip_parts ) ) {
+				$message .= implode( ', ', $skip_parts ) . '.';
+			}
 		}
-
-		if ( ! empty( $table_messages ) ) {
-			$message .= implode( '; ', $table_messages ) . '. ';
-		}
-
-		// Total replacements
-		$message .= sprintf(
-			/* translators: %d: Total replacements */
-			__( 'Total replacements: %d.', 'webp-media-handler' ),
-			$state['stats']['replaced']
-		);
 
 		return $message;
 	}
@@ -527,7 +596,148 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
+	 * Process theme_mods (special handling for attachment IDs and URLs)
+	 *
+	 * @param array $state Job state.
+	 * @return array Result array.
+	 */
+	private function process_theme_mods( $state ) {
+		global $wpdb;
+
+		$dry_run = $state['dry_run'];
+		
+		// Check if we've already processed theme_mods (one-time operation, not batched by cursor)
+		if ( isset( $state['theme_mods_processed'] ) && $state['theme_mods_processed'] ) {
+			return array(
+				'completed' => true,
+				'processed' => $state['stats']['tables']['theme_mods']['scanned'],
+				'total' => $state['stats']['tables']['theme_mods']['scanned'],
+				'updated' => $state['stats']['tables']['theme_mods']['updated'],
+				'replacements' => 0,
+				'message' => sprintf( __( 'Completed %s.', 'webp-media-handler' ), 'theme_mods' ),
+				'state' => $state,
+			);
+		}
+
+		// Get all theme_mods_* options
+		$theme_mods_options = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s",
+				$wpdb->esc_like( 'theme_mods_' ) . '%'
+			)
+		);
+
+		$rows_updated = 0;
+		$rows_scanned = count( $theme_mods_options );
+		$replacements = 0;
+
+		foreach ( $theme_mods_options as $mod_option ) {
+			$theme_mods = maybe_unserialize( $mod_option->option_value );
+			
+			if ( ! is_array( $theme_mods ) ) {
+				continue;
+			}
+
+			$has_changes = false;
+			$new_mods = $this->process_theme_mods_array( $theme_mods, $has_changes, $replacements );
+
+			if ( $has_changes ) {
+				if ( ! $dry_run ) {
+					update_option( $mod_option->option_name, $new_mods );
+				}
+				$rows_updated++;
+			}
+		}
+
+		// Mark as processed
+		$state['theme_mods_processed'] = true;
+
+		// Update stats
+		$state['stats']['tables']['theme_mods']['scanned'] = $rows_scanned;
+		$state['stats']['tables']['theme_mods']['updated'] += $rows_updated;
+		$state['stats']['replaced'] += $replacements;
+
+		return array(
+			'completed' => true,
+			'processed' => $rows_scanned,
+			'total' => $rows_scanned,
+			'updated' => $rows_updated,
+			'replacements' => $replacements,
+			'message' => sprintf(
+				__( 'Processed %d theme mods, %d updated.', 'webp-media-handler' ),
+				$rows_scanned,
+				$rows_updated
+			),
+			'state' => $state,
+		);
+	}
+
+	/**
+	 * Process theme_mods array, handling attachment IDs and URLs
+	 *
+	 * @param array $mods Theme mods array.
+	 * @param bool  $has_changes Output parameter - set to true if changes made.
+	 * @param int   $replacements Output parameter - count of replacements.
+	 * @return array Processed mods array.
+	 */
+	private function process_theme_mods_array( $mods, &$has_changes, &$replacements ) {
+		if ( ! is_array( $mods ) ) {
+			return $mods;
+		}
+
+		$processed = array();
+
+		foreach ( $mods as $key => $value ) {
+			if ( is_array( $value ) ) {
+				$processed[ $key ] = $this->process_theme_mods_array( $value, $has_changes, $replacements );
+			} elseif ( is_numeric( $value ) && $value > 0 ) {
+				// Potential attachment ID - check if it's a valid attachment and has WebP
+				$attachment_id = absint( $value );
+				$attachment_file = get_attached_file( $attachment_id );
+				
+				if ( $attachment_file && file_exists( $attachment_file ) ) {
+					// Check if WebP version exists
+					$webp_file = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $attachment_file );
+					if ( file_exists( $webp_file ) ) {
+						// Get WebP URL - if the attachment has been converted to WebP, 
+						// the URL should already point to WebP, but we'll use the WebP file URL
+						$upload_dir = wp_upload_dir();
+						$relative_path = str_replace( $upload_dir['basedir'], '', $webp_file );
+						$webp_url = $upload_dir['baseurl'] . $relative_path;
+						
+						// Update the mod value to use the WebP URL instead of ID
+						// This matches snippet behavior: convert IDs to WebP URLs when WebP exists
+						$processed[ $key ] = $webp_url;
+						$has_changes = true;
+						$replacements++;
+					} else {
+						$processed[ $key ] = $value;
+					}
+				} else {
+					// Not a valid attachment, keep as-is
+					$processed[ $key ] = $value;
+				}
+			} elseif ( is_string( $value ) ) {
+				// Process URL strings
+				$new_value = $this->replace_urls_in_value( $value );
+				if ( $new_value !== $value ) {
+					$has_changes = true;
+					$replacements += $this->count_replacements( $value, $new_value );
+					$processed[ $key ] = $new_value;
+				} else {
+					$processed[ $key ] = $value;
+				}
+			} else {
+				$processed[ $key ] = $value;
+			}
+		}
+
+		return $processed;
+	}
+
+	/**
 	 * Process wp_options table with cursor-based pagination
+	 * Excludes theme_mods_* options as they're handled separately
 	 *
 	 * @param array $state Job state.
 	 * @return array Result array.
@@ -538,11 +748,12 @@ class WPMH_Replace_Image_URLs {
 		$dry_run = $state['dry_run'];
 		$last_id = $state['last_id'];
 
-		$rows = $wpdb->get_results(
+			$rows = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT option_id as meta_id, option_name as meta_key, option_value as meta_value FROM {$wpdb->options}
 				WHERE option_id > %d
 				  AND option_name NOT IN ('active_plugins', 'cron', 'rewrite_rules')
+				  AND option_name NOT LIKE %s
 				  AND (option_value LIKE %s OR option_value LIKE %s OR option_value LIKE %s
 				       OR option_value LIKE %s OR option_value LIKE %s OR option_value LIKE %s)
 				ORDER BY option_id ASC
