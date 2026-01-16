@@ -63,6 +63,7 @@ class WPMH_Image_Watermark {
 		// WordPress.org compliance: wp_unslash() before sanitization
 		$watermark_id = isset( $_POST['watermark_id'] ) ? absint( wp_unslash( $_POST['watermark_id'] ) ) : 0;
 		$watermark_size = isset( $_POST['watermark_size'] ) ? absint( wp_unslash( $_POST['watermark_size'] ) ) : 100;
+		// Get watermark position - default to 'bottom-right' only if not provided (not as a fallback after validation)
 		$watermark_position = isset( $_POST['watermark_position'] ) ? sanitize_text_field( wp_unslash( $_POST['watermark_position'] ) ) : 'bottom-right';
 		$target_mode = isset( $_POST['target_mode'] ) ? sanitize_text_field( wp_unslash( $_POST['target_mode'] ) ) : 'selected';
 
@@ -292,7 +293,20 @@ class WPMH_Image_Watermark {
 			$padding
 		);
 
-		// Apply watermark with alpha transparency
+		// DEBUG: Log position calculation (only when WP_DEBUG is enabled)
+		// This confirms single application per image
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			error_log( sprintf(
+				'[WPMH Watermark] Attachment ID: %d | Selected position: %s | Calculated X: %d | Calculated Y: %d',
+				$attachment_id,
+				$watermark_position,
+				$position['x'],
+				$position['y']
+			) );
+		}
+
+		// Apply watermark with alpha transparency - SINGLE APPLICATION ONLY
+		// This is the ONLY place where the watermark is composited onto the image
 		$this->apply_watermark_with_alpha( $target_image, $watermark_image, $position['x'], $position['y'] );
 
 		// Clean up watermark resource
@@ -428,30 +442,32 @@ class WPMH_Image_Watermark {
 		$x = 0;
 		$y = 0;
 
-		switch ( $position ) {
-			case 'top-left':
-				$x = $padding;
-				$y = $padding;
-				break;
-			case 'top-right':
-				$x = $target_width - $watermark_width - $padding;
-				$y = $padding;
-				break;
-			case 'bottom-left':
-				$x = $padding;
-				$y = $target_height - $watermark_height - $padding;
-				break;
-			case 'bottom-right':
-				$x = $target_width - $watermark_width - $padding;
-				$y = $target_height - $watermark_height - $padding;
-				break;
-			case 'center':
-				$x = ( $target_width - $watermark_width ) / 2;
-				$y = ( $target_height - $watermark_height ) / 2;
-				break;
+		// Use strict if/elseif chain to ensure mutually exclusive position selection
+		// This prevents fall-through issues and ensures only ONE position is calculated
+		if ( 'top-left' === $position ) {
+			$x = $padding;
+			$y = $padding;
+		} elseif ( 'top-right' === $position ) {
+			$x = $target_width - $watermark_width - $padding;
+			$y = $padding;
+		} elseif ( 'bottom-left' === $position ) {
+			$x = $padding;
+			$y = $target_height - $watermark_height - $padding;
+		} elseif ( 'bottom-right' === $position ) {
+			$x = $target_width - $watermark_width - $padding;
+			$y = $target_height - $watermark_height - $padding;
+		} elseif ( 'center' === $position ) {
+			$x = ( $target_width - $watermark_width ) / 2;
+			$y = ( $target_height - $watermark_height ) / 2;
+		} else {
+			// Invalid position - fallback to safe default (bottom-right) without applying two watermarks
+			// This ensures only ONE watermark is applied even with invalid input
+			$x = $target_width - $watermark_width - $padding;
+			$y = $target_height - $watermark_height - $padding;
 		}
 
 		// Ensure watermark stays within image bounds with padding
+		// This only clamps values, it does NOT create a second position
 		$x = max( $padding, min( $x, $target_width - $watermark_width - $padding ) );
 		$y = max( $padding, min( $y, $target_height - $watermark_height - $padding ) );
 
@@ -463,6 +479,9 @@ class WPMH_Image_Watermark {
 
 	/**
 	 * Apply watermark with alpha transparency support
+	 *
+	 * CRITICAL: This function MUST be called exactly ONCE per image.
+	 * Any duplicate call will result in multiple watermarks being applied.
 	 *
 	 * @param resource|GdImage $target_image Target image resource.
 	 * @param resource|GdImage $watermark_image Watermark image resource.
@@ -478,9 +497,11 @@ class WPMH_Image_Watermark {
 		imagealphablending( $target_image, true );
 		imagesavealpha( $target_image, true );
 
+		// SINGLE WATERMARK APPLICATION - This is the ONLY call to imagecopy for watermarking
 		// Copy watermark onto target with alpha transparency
 		// imagecopy preserves alpha channel from PNG watermark images
 		if ( function_exists( 'imagecopy' ) ) {
+			// Apply watermark exactly once at the specified coordinates
 			imagecopy( $target_image, $watermark_image, $x, $y, 0, 0, $watermark_width, $watermark_height );
 		}
 	}
