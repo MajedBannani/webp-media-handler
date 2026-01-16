@@ -287,28 +287,24 @@ class WPMH_Admin {
 	 * Render watermark feature card
 	 */
 	private function render_watermark_card() {
-		// Issue 2: Defensive migration - normalize watermark_image_id to scalar
-		$watermark_id_raw = $this->settings->get( 'watermark_image_id', 0 );
-		if ( is_array( $watermark_id_raw ) ) {
-			// If array, take the last element and save as scalar
-			$watermark_id = ! empty( $watermark_id_raw ) ? absint( end( $watermark_id_raw ) ) : 0;
-			$this->settings->set( 'watermark_image_id', $watermark_id );
-		} else {
-			$watermark_id = absint( $watermark_id_raw );
-		}
-
+		// NEW DESIGN: Watermark settings are runtime-only, never persisted
+		// Do NOT read from database - use defaults only
 		$enabled = $this->settings->get( 'image_watermark', false );
-		$watermark_size = $this->settings->get( 'watermark_size', 100 );
-		$watermark_position = $this->settings->get( 'watermark_position', 'bottom-right' );
-		$target_mode = $this->settings->get( 'watermark_target_mode', 'selected' );
+		
+		// Defaults only - no persistence
+		$watermark_id = 0; // Always start empty
+		$watermark_size = 100; // Default only
+		$watermark_position = 'bottom-right'; // Default only
+		$target_mode = 'selected'; // Default only
 		
 		$log = $this->settings->get_action_log( 'apply_watermark' );
 		$last_run = $log ? $log['timestamp'] : '';
 
-		// Issue 1: Read inline notice from transient
-		$inline_notice = get_transient( 'wpmh_watermark_notice' );
-		if ( $inline_notice && is_array( $inline_notice ) ) {
-			delete_transient( 'wpmh_watermark_notice' );
+		// E: Read flash message (counts only, no watermark data)
+		$current_user_id = get_current_user_id();
+		$flash_notice = get_transient( 'wpmh_watermark_flash_' . $current_user_id );
+		if ( $flash_notice && is_array( $flash_notice ) ) {
+			delete_transient( 'wpmh_watermark_flash_' . $current_user_id );
 		}
 		?>
 		<div class="wpmh-feature-card wpmh-watermark-card">
@@ -364,10 +360,10 @@ class WPMH_Admin {
 							<strong><?php esc_html_e( 'Watermark Size:', 'webp-media-handler' ); ?></strong>
 						</label>
 						<select id="wpmh-watermark-size" class="wpmh-watermark-size-select">
-							<option value="50" <?php selected( $watermark_size, 50 ); ?>>50px</option>
-							<option value="100" <?php selected( $watermark_size, 100 ); ?>>100px</option>
-							<option value="200" <?php selected( $watermark_size, 200 ); ?>>200px</option>
-							<option value="300" <?php selected( $watermark_size, 300 ); ?>>300px</option>
+							<option value="50">50px</option>
+							<option value="100" selected>100px</option>
+							<option value="200">200px</option>
+							<option value="300">300px</option>
 						</select>
 						<p class="description">
 							<?php esc_html_e( 'Maximum width of the watermark. The watermark will be resized proportionally and will not be upscaled.', 'webp-media-handler' ); ?>
@@ -379,11 +375,11 @@ class WPMH_Admin {
 							<strong><?php esc_html_e( 'Watermark Position:', 'webp-media-handler' ); ?></strong>
 						</label>
 						<select id="wpmh-watermark-position" class="wpmh-watermark-position-select">
-							<option value="top-left" <?php selected( $watermark_position, 'top-left' ); ?>><?php esc_html_e( 'Top Left', 'webp-media-handler' ); ?></option>
-							<option value="top-right" <?php selected( $watermark_position, 'top-right' ); ?>><?php esc_html_e( 'Top Right', 'webp-media-handler' ); ?></option>
-							<option value="bottom-left" <?php selected( $watermark_position, 'bottom-left' ); ?>><?php esc_html_e( 'Bottom Left', 'webp-media-handler' ); ?></option>
-							<option value="bottom-right" <?php selected( $watermark_position, 'bottom-right' ); ?>><?php esc_html_e( 'Bottom Right', 'webp-media-handler' ); ?></option>
-							<option value="center" <?php selected( $watermark_position, 'center' ); ?>><?php esc_html_e( 'Center', 'webp-media-handler' ); ?></option>
+							<option value="top-left"><?php esc_html_e( 'Top Left', 'webp-media-handler' ); ?></option>
+							<option value="top-right"><?php esc_html_e( 'Top Right', 'webp-media-handler' ); ?></option>
+							<option value="bottom-left"><?php esc_html_e( 'Bottom Left', 'webp-media-handler' ); ?></option>
+							<option value="bottom-right" selected><?php esc_html_e( 'Bottom Right', 'webp-media-handler' ); ?></option>
+							<option value="center"><?php esc_html_e( 'Center', 'webp-media-handler' ); ?></option>
 						</select>
 						<p class="description">
 							<?php esc_html_e( 'Position where the watermark will be placed. A minimum padding of 20px from edges will be maintained.', 'webp-media-handler' ); ?>
@@ -396,17 +392,17 @@ class WPMH_Admin {
 						</label>
 						<div class="wpmh-watermark-target-mode">
 							<label>
-								<input type="radio" name="wpmh-watermark-target-mode" value="selected" <?php checked( $target_mode, 'selected' ); ?>>
+								<input type="radio" name="wpmh-watermark-target-mode" value="selected" checked>
 								<?php esc_html_e( 'Selected Images', 'webp-media-handler' ); ?>
 							</label>
 							<br>
 							<label>
-								<input type="radio" name="wpmh-watermark-target-mode" value="all" <?php checked( $target_mode, 'all' ); ?>>
+								<input type="radio" name="wpmh-watermark-target-mode" value="all">
 								<?php esc_html_e( 'All Images', 'webp-media-handler' ); ?>
 								<strong class="wpmh-warning-text"><?php esc_html_e( '(Applies to all images in Media Library)', 'webp-media-handler' ); ?></strong>
 							</label>
 						</div>
-						<div class="wpmh-selected-images-container" id="wpmh-selected-images-container" style="display: <?php echo ( 'selected' === $target_mode ) ? 'block' : 'none'; ?>;">
+						<div class="wpmh-selected-images-container" id="wpmh-selected-images-container" style="display: block;">
 							<button type="button" class="button wpmh-select-images-btn" id="wpmh-select-images-btn">
 								<?php esc_html_e( 'Select Images from Media Library', 'webp-media-handler' ); ?>
 							</button>
@@ -432,9 +428,9 @@ class WPMH_Admin {
 						<?php esc_html_e( 'Apply Watermark', 'webp-media-handler' ); ?>
 					</button>
 					<div class="wpmh-action-status" id="wpmh-status-apply_watermark"></div>
-					<?php if ( ! empty( $inline_notice ) && isset( $inline_notice['message'] ) ) : ?>
-						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice wpmh-inline-notice-<?php echo esc_attr( isset( $inline_notice['type'] ) ? $inline_notice['type'] : 'success' ); ?>">
-							<?php echo esc_html( $inline_notice['message'] ); ?>
+					<?php if ( ! empty( $flash_notice ) && isset( $flash_notice['message'] ) ) : ?>
+						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice wpmh-inline-notice-<?php echo esc_attr( isset( $flash_notice['type'] ) ? $flash_notice['type'] : 'success' ); ?>">
+							<?php echo esc_html( $flash_notice['message'] ); ?>
 						</div>
 					<?php else : ?>
 						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice" style="display: none;"></div>
@@ -495,14 +491,12 @@ class WPMH_Admin {
 					unset( $settings['watermark_target_mode'] );
 				}
 			}
-			// Issue 2: Ensure watermark_image_id is scalar before saving
-			if ( isset( $settings['watermark_image_id'] ) ) {
-				if ( is_array( $settings['watermark_image_id'] ) ) {
-					$settings['watermark_image_id'] = ! empty( $settings['watermark_image_id'] ) ? absint( end( $settings['watermark_image_id'] ) ) : 0;
-				} else {
-					$settings['watermark_image_id'] = absint( $settings['watermark_image_id'] );
-				}
+			// NEW DESIGN: Filter out watermark settings - do NOT save them
+			$blocked_keys = array( 'watermark_image_id', 'watermark_size', 'watermark_position', 'watermark_target_mode' );
+			foreach ( $blocked_keys as $key ) {
+				unset( $settings[ $key ] );
 			}
+			
 			foreach ( $settings as $key => $value ) {
 				$this->settings->set( $key, $value );
 			}

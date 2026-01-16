@@ -78,65 +78,28 @@ class WPMH_Image_Watermark {
 			wp_send_json_error( array( 'message' => __( 'GD library is not available. Watermarking requires GD extension.', 'webp-media-handler' ) ) );
 		}
 
-		// Get watermark configuration
-		// WordPress.org compliance: wp_unslash() before sanitization
-		// CRITICAL FIX: Always prioritize POST value (current form submission) over saved option
+		// NEW DESIGN: Read watermark configuration ONLY from POST - never from database
+		// No persistence - watermark settings are runtime-only
 		
-		// Debug: Log POST and option values (only when WP_DEBUG is enabled)
-		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-			$post_watermark_id_debug = isset( $_POST['watermark_id'] ) ? wp_unslash( $_POST['watermark_id'] ) : null;
-			$saved_watermark_id_debug = $this->settings->get( 'watermark_image_id', 0 );
-			error_log( sprintf(
-				'[WPMH Debug] POST watermark_id: %s',
-				print_r( $post_watermark_id_debug, true )
-			) );
-			error_log( sprintf(
-				'[WPMH Debug] OPTION watermark_image_id: %s',
-				print_r( $saved_watermark_id_debug, true )
-			) );
+		// D: Server-side validation - watermark_image_id is REQUIRED
+		if ( ! isset( $_POST['watermark_id'] ) || empty( $_POST['watermark_id'] ) ) {
+			wp_send_json_error( array( 'message' => __( 'Please select a watermark image.', 'webp-media-handler' ) ) );
 		}
 		
-		// Step 1: Read from POST first (this is the current form submission value)
-		$watermark_id = 0;
-		if ( isset( $_POST['watermark_id'] ) ) {
-			$watermark_id_raw = wp_unslash( $_POST['watermark_id'] );
-			// Normalize if array
-			if ( is_array( $watermark_id_raw ) ) {
-				$watermark_id = ! empty( $watermark_id_raw ) ? absint( end( $watermark_id_raw ) ) : 0;
-			} else {
-				$watermark_id = absint( $watermark_id_raw );
-			}
+		// Read all watermark params from POST only
+		$watermark_id_raw = wp_unslash( $_POST['watermark_id'] );
+		if ( is_array( $watermark_id_raw ) ) {
+			$watermark_id = ! empty( $watermark_id_raw ) ? absint( end( $watermark_id_raw ) ) : 0;
+		} else {
+			$watermark_id = absint( $watermark_id_raw );
 		}
 		
-		// Step 2: Only fall back to saved option if POST is NOT set at all (not if it's 0 or empty)
-		if ( ! isset( $_POST['watermark_id'] ) ) {
-			// POST key doesn't exist - use saved option as fallback
-			$saved_watermark_id = $this->settings->get( 'watermark_image_id', 0 );
-			// Normalize if array
-			if ( is_array( $saved_watermark_id ) ) {
-				$saved_watermark_id = ! empty( $saved_watermark_id ) ? absint( end( $saved_watermark_id ) ) : 0;
-				// Normalize saved setting
-				$this->settings->set( 'watermark_image_id', $saved_watermark_id );
-			}
-			$watermark_id = absint( $saved_watermark_id );
+		// Validate watermark_id is valid
+		if ( empty( $watermark_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'Please select a watermark image.', 'webp-media-handler' ) ) );
 		}
 		
-		// Step 3: Always update saved option with POST value (if POST was set) to keep it current
-		if ( isset( $_POST['watermark_id'] ) ) {
-			$this->settings->set( 'watermark_image_id', $watermark_id );
-		}
-		
-		// Debug: Log final resolved value
-		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-			$watermark_file = $watermark_id > 0 ? get_attached_file( $watermark_id ) : 'N/A';
-			error_log( sprintf(
-				'[WPMH Debug] RESOLVED watermark_id: %d | Using watermark file: %s',
-				$watermark_id,
-				$watermark_file ? $watermark_file : 'FILE NOT FOUND'
-			) );
-		}
 		$watermark_size = isset( $_POST['watermark_size'] ) ? absint( wp_unslash( $_POST['watermark_size'] ) ) : 100;
-		// Get watermark position - default to 'bottom-right' only if not provided (not as a fallback after validation)
 		$watermark_position = isset( $_POST['watermark_position'] ) ? sanitize_text_field( wp_unslash( $_POST['watermark_position'] ) ) : 'bottom-right';
 		$target_mode = isset( $_POST['target_mode'] ) ? sanitize_text_field( wp_unslash( $_POST['target_mode'] ) ) : 'selected';
 
@@ -291,14 +254,15 @@ class WPMH_Image_Watermark {
 				$message .= ' ' . __( 'Note: Watermark source image was skipped to prevent watermarking the watermark.', 'webp-media-handler' );
 			}
 
-			// FIX E: Store notice in transient for display on admin page (if needed)
-			// The AJAX response will show the message immediately, but also store for page reload
-			set_transient( 'wpmh_watermark_notice', array(
+			// E: Store flash message (counts only, no watermark data) - user-specific
+			$current_user_id = get_current_user_id();
+			set_transient( 'wpmh_watermark_flash_' . $current_user_id, array(
 				'type' => 'success',
 				'message' => $message,
-				'success' => $final_success,
+				'processed' => $final_success,
 				'failed' => $final_failed,
 				'skipped' => $final_skipped,
+				'time' => current_time( 'mysql' ),
 			), 60 ); // 60 second expiry
 
 			wp_send_json_success( array(

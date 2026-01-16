@@ -57,7 +57,8 @@
 			$(document).on('click', '.wpmh-select-images-btn', this.selectTargetImages);
 			
 			// Save watermark settings when changed
-			$(document).on('change', '.wpmh-watermark-size-select, .wpmh-watermark-position-select, input[name="wpmh-watermark-target-mode"]', this.saveWatermarkSettings);
+			// NEW DESIGN: Do not save watermark settings - they are runtime-only
+		// $(document).on('change', '.wpmh-watermark-size-select, .wpmh-watermark-position-select, input[name="wpmh-watermark-target-mode"]', this.saveWatermarkSettings);
 		},
 
 		/**
@@ -304,7 +305,7 @@
 			});
 
 			frame.on('select', function() {
-				// Issue 2: Ensure only ONE image is selected (use first() and reset selection)
+				// NEW DESIGN: Only ONE image is selected - no persistence
 				var selection = frame.state().get('selection');
 				if (selection.length > 1) {
 					// If multiple selected, reset to only first one
@@ -313,7 +314,7 @@
 				}
 				var attachment = selection.first().toJSON();
 				
-				// Issue 2: Clear previous value and set ONLY the new one (scalar, not array)
+				// Set watermark ID in hidden input for POST (runtime only, not saved)
 				$('#wpmh-watermark-image-id').val(attachment.id);
 				
 				var $preview = $('#wpmh-watermark-preview');
@@ -321,8 +322,7 @@
 				$preview.show();
 				$('.wpmh-remove-watermark-image').show();
 
-				// Save watermark image ID (single scalar value)
-				WPMHAdmin.saveWatermarkImageId(attachment.id);
+				// Do NOT save to database - watermark settings are runtime-only
 			});
 
 			frame.open();
@@ -336,7 +336,7 @@
 			$('#wpmh-watermark-image-id').val(0);
 			$('#wpmh-watermark-preview').hide().html('');
 			$(this).hide();
-			WPMHAdmin.saveWatermarkImageId(0);
+			// Do NOT save to database - watermark settings are runtime-only
 		},
 
 		/**
@@ -427,40 +427,15 @@
 		},
 
 		/**
-		 * Save watermark image ID via AJAX
+		 * NEW DESIGN: Watermark settings are runtime-only, not persisted
+		 * These functions are no longer used - watermark settings come from form POST only
 		 */
 		saveWatermarkImageId: function(imageId) {
-			$.ajax({
-				url: wpmhAdmin.ajaxUrl,
-				type: 'POST',
-				data: {
-					action: 'wpmh_save_watermark_settings',
-					nonce: wpmhAdmin.nonces.toggle,
-					setting: 'watermark_image_id',
-					value: imageId
-				}
-			});
+			// No-op: Watermark settings are runtime-only
 		},
 
-		/**
-		 * Save watermark settings
-		 */
 		saveWatermarkSettings: function() {
-			var settings = {
-				watermark_size: $('#wpmh-watermark-size').val(),
-				watermark_position: $('#wpmh-watermark-position').val(),
-				watermark_target_mode: $('input[name="wpmh-watermark-target-mode"]:checked').val()
-			};
-
-			$.ajax({
-				url: wpmhAdmin.ajaxUrl,
-				type: 'POST',
-				data: {
-					action: 'wpmh_save_watermark_settings',
-					nonce: wpmhAdmin.nonces.toggle,
-					settings: settings
-				}
-			});
+			// No-op: Watermark settings are runtime-only
 		}
 	};
 
