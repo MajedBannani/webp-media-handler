@@ -77,11 +77,15 @@ class WPMH_GitHub_Updater {
 	/**
 	 * Check for plugin updates
 	 *
+	 * SAFE TRANSIENT HANDLING: Accepts $transient which can be FALSE.
+	 * If not object, returns $transient immediately without modification.
+	 *
 	 * @param object|false $transient Update transient object or false.
 	 * @return object|false Modified transient object or false.
 	 */
 	public function check_for_update( $transient ) {
 		// Defensive guard: WordPress may pass false if transient doesn't exist
+		// MUST return $transient immediately if not object
 		if ( ! is_object( $transient ) ) {
 			return $transient;
 		}
@@ -105,27 +109,37 @@ class WPMH_GitHub_Updater {
 			return $transient;
 		}
 
-		// Normalize both versions for accurate comparison
-		// GitHub tags include leading 'v' (e.g. v1.0.12), installed version does not
-		$latest_version = $this->normalize_version( $release_data->tag_name );
-		$current_version = $this->normalize_version( $this->current_version );
+		// HARD VERSION NORMALIZATION
+		// Strip leading "v" from GitHub tag, trim whitespace, cast to plain string
+		$remote_version = $this->normalize_version( $release_data->tag_name );
+		$local_version  = $this->normalize_version( $this->current_version );
 
-		// Only show update if latest version is actually newer (not equal)
-		// version_compare returns -1 if current < latest, 0 if equal, 1 if current > latest
-		if ( version_compare( $current_version, $latest_version, '<' ) ) {
-			// Prepare update data
-			if ( ! isset( $transient->response ) ) {
-				$transient->response = array();
+		// STRICT VERSION CHECK - Only show update if remote > local
+		// version_compare returns: -1 if local < remote, 0 if equal, 1 if local > remote
+		$version_comparison = version_compare( $local_version, $remote_version );
+		
+		// If versions are equal or local is greater, DO NOT add update
+		if ( $version_comparison >= 0 ) {
+			// Remove any existing update entry for this plugin (in case it was added before)
+			if ( isset( $transient->response ) && is_array( $transient->response ) ) {
+				unset( $transient->response[ $this->plugin_basename ] );
 			}
-
-			$transient->response[ $this->plugin_basename ] = (object) array(
-				'slug'        => dirname( $this->plugin_basename ),
-				'plugin'      => $this->plugin_basename,
-				'new_version' => $latest_version,
-				'url'         => 'https://github.com/MajedBannani/webp-media-handler',
-				'package'     => $zip_asset_url,
-			);
+			return $transient;
 		}
+
+		// Only proceed if remote version is strictly greater (version_comparison < 0)
+		// Prepare update data
+		if ( ! isset( $transient->response ) ) {
+			$transient->response = array();
+		}
+
+		$transient->response[ $this->plugin_basename ] = (object) array(
+			'slug'        => dirname( $this->plugin_basename ),
+			'plugin'      => $this->plugin_basename,
+			'new_version' => $remote_version,
+			'url'         => 'https://github.com/MajedBannani/webp-media-handler',
+			'package'     => $zip_asset_url,
+		);
 
 		return $transient;
 	}
@@ -335,16 +349,20 @@ class WPMH_GitHub_Updater {
 	/**
 	 * Normalize version string by removing leading 'v' and trimming whitespace
 	 *
-	 * Ensures accurate version comparison by normalizing GitHub tags (e.g. "v1.0.12")
-	 * to match installed version format (e.g. "1.0.12").
+	 * HARD NORMALIZATION: Ensures accurate version comparison by normalizing GitHub tags
+	 * (e.g. "v1.0.13") to match installed version format (e.g. "1.0.13").
 	 *
-	 * @param string $version Version string.
-	 * @return string Normalized version string.
+	 * @param string|mixed $version Version string (may be mixed type from API).
+	 * @return string Normalized version string (plain string, guaranteed).
 	 */
 	private function normalize_version( $version ) {
-		// Trim whitespace first, then remove leading 'v' (case-insensitive)
+		// Cast to string first to handle any mixed types
+		$version = (string) $version;
+		// Trim whitespace from both ends
 		$version = trim( $version );
+		// Remove leading 'v' or 'V' (case-insensitive)
 		$version = ltrim( $version, 'vV' );
+		// Final trim to ensure no remaining whitespace
 		return trim( $version );
 	}
 
