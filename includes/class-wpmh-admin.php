@@ -289,6 +289,11 @@ class WPMH_Admin {
 				        data-nonce-action="<?php echo esc_attr( $nonce_action ); ?>">
 					<?php echo esc_html( $button_text ); ?>
 				</button>
+				<?php if ( 'replace_urls' === $action_key ) : ?>
+					<a href="#" id="wpmh-reset-replace-job" class="button" style="display: none; margin-left: 10px;">
+						<?php esc_html_e( 'Reset Job', 'webp-media-handler' ); ?>
+					</a>
+				<?php endif; ?>
 				<div class="wpmh-action-status" id="wpmh-status-<?php echo esc_attr( $action_key ); ?>"></div>
 			</div>
 		</div>

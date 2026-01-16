@@ -17,6 +17,8 @@
 	init: function() {
 		this.bindEvents();
 		this.initWatermarkToggle();
+		// Hide reset button initially
+		$('#wpmh-reset-replace-job').hide();
 	},
 
 	/**
@@ -59,6 +61,9 @@
 			// Save watermark settings when changed
 			// NEW DESIGN: Do not save watermark settings - they are runtime-only
 		// $(document).on('change', '.wpmh-watermark-size-select, .wpmh-watermark-position-select, input[name="wpmh-watermark-target-mode"]', this.saveWatermarkSettings);
+			
+			// Reset replace job button
+			$(document).on('click', '#wpmh-reset-replace-job', this.resetReplaceJob);
 		},
 
 		/**
@@ -171,13 +176,196 @@
 			// Show processing status
 			$status.removeClass('success error').addClass('show info').text(wpmhAdmin.strings.processing);
 
-			// Start processing
-			var dryRun = (action === 'replace_urls') ? $('#wpmh-dry-run-replace-urls').is(':checked') : false;
-			WPMHAdmin.processAction(action, nonceAction, 0, null, dryRun);
+			// Handle URL replacement specially (uses new job-based system)
+			if (action === 'replace_urls') {
+				WPMHAdmin.startReplaceJob(action, nonceAction);
+			} else {
+				// Other actions use old system
+				var dryRun = false;
+				WPMHAdmin.processAction(action, nonceAction, 0, null, dryRun);
+			}
 		},
 
 		/**
-		 * Process action (with batching)
+		 * Start replace URLs job (new job-based system)
+		 */
+		startReplaceJob: function(action, nonceAction) {
+			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
+			var statusId = '#wpmh-status-' + action;
+			var $status = $(statusId);
+
+			// Get dry-run flag
+			var dryRun = $('#wpmh-dry-run-replace-urls').is(':checked');
+
+			// Get nonce
+			var nonce = wpmhAdmin.nonces.replace_urls;
+
+			// Show reset button if hidden
+			$('#wpmh-reset-replace-job').show();
+
+			$.ajax({
+				url: wpmhAdmin.ajaxUrl,
+				type: 'POST',
+				data: {
+					action: 'wpmh_start_replace_job',
+					nonce: nonce,
+					dry_run: dryRun ? '1' : '0'
+				},
+				success: function(response) {
+					if (response.success) {
+						$status.removeClass('info error').addClass('show success').text(response.data.message);
+						// Start batch loop
+						setTimeout(function() {
+							WPMHAdmin.runReplaceBatch(action, nonceAction, 0);
+						}, 500);
+					} else {
+						$status.removeClass('info success').addClass('show error').text(response.data.message || wpmhAdmin.strings.error);
+						$button.prop('disabled', false);
+					}
+				},
+				error: function(xhr, status, error) {
+					WPMHAdmin.handleReplaceError($status, $button, error, 0);
+				}
+			});
+		},
+
+		/**
+		 * Run replace URLs batch (with retries)
+		 */
+		runReplaceBatch: function(action, nonceAction, retryCount) {
+			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
+			var statusId = '#wpmh-status-' + action;
+			var $status = $(statusId);
+
+			// Max retries
+			if (retryCount >= 2) {
+							$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error + ' Maximum retries reached. Please reset and try again.');
+				$button.prop('disabled', false);
+				return;
+			}
+
+			var nonce = wpmhAdmin.nonces.replace_urls;
+
+			$.ajax({
+				url: wpmhAdmin.ajaxUrl,
+				type: 'POST',
+				data: {
+					action: 'wpmh_run_replace_batch',
+					nonce: nonce
+				},
+				timeout: 30000, // 30 second timeout
+				success: function(response) {
+					if (response.success) {
+						// Update status
+						var message = response.data.message;
+						if (response.data.processed !== undefined && response.data.total !== undefined) {
+							message += ' (' + response.data.processed + ' of ' + response.data.total + ')';
+						}
+						$status.removeClass('info error').addClass('show success').text(message);
+
+						// Check if should continue
+						if (response.data.continue !== false && response.data.stage !== 'complete') {
+							// Continue with next batch
+							setTimeout(function() {
+								WPMHAdmin.runReplaceBatch(action, nonceAction, 0); // Reset retry count on success
+							}, 500);
+						} else {
+							// Completed
+							$button.prop('disabled', false);
+							
+							// Show final stats
+							if (response.data.stats) {
+								var statsMsg = response.data.message;
+								if (response.data.stats.tables) {
+									var tableDetails = [];
+									for (var table in response.data.stats.tables) {
+										if (response.data.stats.tables.hasOwnProperty(table)) {
+											var t = response.data.stats.tables[table];
+											if (t.scanned > 0) {
+												tableDetails.push(table + ': ' + t.scanned + ' scanned, ' + t.updated + ' updated');
+											}
+										}
+									}
+									if (tableDetails.length > 0) {
+										statsMsg += '\n\n' + tableDetails.join('\n');
+									}
+								}
+								if (statsMsg.indexOf('\n') !== -1) {
+									$status.html(statsMsg.replace(/\n/g, '<br>'));
+								}
+							}
+						}
+					} else {
+						// Error - retry
+						WPMHAdmin.handleReplaceError($status, $button, response.data.message || wpmhAdmin.strings.error, retryCount, action, nonceAction);
+					}
+				},
+				error: function(xhr, status, error) {
+					WPMHAdmin.handleReplaceError($status, $button, error, retryCount, action, nonceAction);
+				}
+			});
+		},
+
+		/**
+		 * Handle replace job errors with retry
+		 */
+		handleReplaceError: function($status, $button, error, retryCount, action, nonceAction) {
+			retryCount = retryCount || 0;
+			
+			if (retryCount < 2) {
+				// Retry
+				$status.removeClass('success').addClass('info').text(wpmhAdmin.strings.processing + ' (Retry ' + (retryCount + 1) + '/2)');
+				setTimeout(function() {
+					WPMHAdmin.runReplaceBatch(action, nonceAction, retryCount + 1);
+				}, 1000);
+			} else {
+				// Max retries reached
+								$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error + ': ' + error + ' Please reset and try again.');
+				$button.prop('disabled', false);
+			}
+		},
+
+		/**
+		 * Reset replace job
+		 */
+		resetReplaceJob: function(e) {
+			e.preventDefault();
+
+			if (!confirm('Reset the current job? This will clear all progress.')) {
+				return;
+			}
+
+			var $button = $('.wpmh-action-button[data-action="replace_urls"]');
+			var statusId = '#wpmh-status-replace_urls';
+			var $status = $(statusId);
+			var $resetBtn = $('#wpmh-reset-replace-job');
+
+			var nonce = wpmhAdmin.nonces.replace_urls;
+
+			$.ajax({
+				url: wpmhAdmin.ajaxUrl,
+				type: 'POST',
+				data: {
+					action: 'wpmh_reset_replace_job',
+					nonce: nonce
+				},
+				success: function(response) {
+					if (response.success) {
+						$status.removeClass('success error info').text('');
+						$button.prop('disabled', false);
+						$resetBtn.hide();
+					} else {
+						alert(response.data.message || wpmhAdmin.strings.error);
+					}
+				},
+				error: function() {
+					alert(wpmhAdmin.strings.error);
+				}
+			});
+		},
+
+		/**
+		 * Process action (with batching) - OLD SYSTEM for other actions
 		 */
 		processAction: function(action, nonceAction, offset, table, dryRun) {
 			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
