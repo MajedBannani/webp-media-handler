@@ -144,6 +144,33 @@
 	color: #0c5460;
 }
 
+/* Issue 1: Inline notice for watermark (under Apply button) */
+.wpmh-inline-notice {
+	margin-top: 10px;
+	padding: 10px 12px;
+	border-radius: 4px;
+	border-left: 4px solid;
+	display: block;
+}
+
+.wpmh-inline-notice.wpmh-inline-notice-success {
+	background-color: #d4edda;
+	border-left-color: #46b450;
+	color: #155724;
+}
+
+.wpmh-inline-notice.wpmh-inline-notice-error {
+	background-color: #f8d7da;
+	border-left-color: #dc3232;
+	color: #721c24;
+}
+
+.wpmh-inline-notice.wpmh-inline-notice-warning {
+	background-color: #fff3cd;
+	border-left-color: #ffb900;
+	color: #856404;
+}
+
 .wpmh-last-run {
 	margin-bottom: 15px;
 	padding: 10px;

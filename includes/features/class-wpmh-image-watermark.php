@@ -80,7 +80,27 @@ class WPMH_Image_Watermark {
 
 		// Get watermark configuration
 		// WordPress.org compliance: wp_unslash() before sanitization
-		$watermark_id = isset( $_POST['watermark_id'] ) ? absint( wp_unslash( $_POST['watermark_id'] ) ) : 0;
+		// Issue 2: Ensure watermark_id is scalar (single value), not array
+		$watermark_id_raw = isset( $_POST['watermark_id'] ) ? wp_unslash( $_POST['watermark_id'] ) : 0;
+		if ( is_array( $watermark_id_raw ) ) {
+			// If array, take last element and normalize to scalar
+			$watermark_id = ! empty( $watermark_id_raw ) ? absint( end( $watermark_id_raw ) ) : 0;
+		} else {
+			$watermark_id = absint( $watermark_id_raw );
+		}
+		
+		// Issue 2: Defensive check - also validate saved setting
+		$saved_watermark_id = $this->settings->get( 'watermark_image_id', 0 );
+		if ( is_array( $saved_watermark_id ) ) {
+			$saved_watermark_id = ! empty( $saved_watermark_id ) ? absint( end( $saved_watermark_id ) ) : 0;
+			// Normalize saved setting
+			$this->settings->set( 'watermark_image_id', $saved_watermark_id );
+		}
+		
+		// If no watermark_id from POST, fall back to saved setting
+		if ( empty( $watermark_id ) && ! empty( $saved_watermark_id ) ) {
+			$watermark_id = absint( $saved_watermark_id );
+		}
 		$watermark_size = isset( $_POST['watermark_size'] ) ? absint( wp_unslash( $_POST['watermark_size'] ) ) : 100;
 		// Get watermark position - default to 'bottom-right' only if not provided (not as a fallback after validation)
 		$watermark_position = isset( $_POST['watermark_position'] ) ? sanitize_text_field( wp_unslash( $_POST['watermark_position'] ) ) : 'bottom-right';

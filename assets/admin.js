@@ -220,6 +220,15 @@
 						// Update status
 						$status.removeClass('info error').addClass('show success').text(response.data.message);
 
+						// Issue 1: Show inline notice for watermark action
+						if (action === 'apply_watermark') {
+							var $inlineNotice = $('#wpmh-watermark-inline-notice');
+							$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
+								.addClass('wpmh-inline-notice-success')
+								.text(response.data.message)
+								.show();
+						}
+
 						// If not completed, continue processing
 						if (!response.data.completed) {
 							setTimeout(function() {
@@ -231,11 +240,31 @@
 						}
 					} else {
 						$status.removeClass('info success').addClass('show error').text(response.data.message || wpmhAdmin.strings.error);
+						
+						// Issue 1: Show inline error notice for watermark action
+						if (action === 'apply_watermark') {
+							var $inlineNotice = $('#wpmh-watermark-inline-notice');
+							$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
+								.addClass('wpmh-inline-notice-error')
+								.text(response.data.message || wpmhAdmin.strings.error)
+								.show();
+						}
+						
 						$button.prop('disabled', false);
 					}
 				},
 				error: function() {
 					$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error);
+					
+					// Issue 1: Show inline error notice for watermark action
+					if (action === 'apply_watermark') {
+						var $inlineNotice = $('#wpmh-watermark-inline-notice');
+						$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
+							.addClass('wpmh-inline-notice-error')
+							.text(wpmhAdmin.strings.error)
+							.show();
+					}
+					
 					$button.prop('disabled', false);
 				}
 			});
@@ -275,7 +304,16 @@
 			});
 
 			frame.on('select', function() {
-				var attachment = frame.state().get('selection').first().toJSON();
+				// Issue 2: Ensure only ONE image is selected (use first() and reset selection)
+				var selection = frame.state().get('selection');
+				if (selection.length > 1) {
+					// If multiple selected, reset to only first one
+					var firstAttachment = selection.first();
+					selection.reset([firstAttachment]);
+				}
+				var attachment = selection.first().toJSON();
+				
+				// Issue 2: Clear previous value and set ONLY the new one (scalar, not array)
 				$('#wpmh-watermark-image-id').val(attachment.id);
 				
 				var $preview = $('#wpmh-watermark-preview');
@@ -283,7 +321,7 @@
 				$preview.show();
 				$('.wpmh-remove-watermark-image').show();
 
-				// Save watermark image ID
+				// Save watermark image ID (single scalar value)
 				WPMHAdmin.saveWatermarkImageId(attachment.id);
 			});
 

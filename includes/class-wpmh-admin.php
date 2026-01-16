@@ -51,40 +51,6 @@ class WPMH_Admin {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
 		add_action( 'wp_ajax_wpmh_toggle_feature', array( $this, 'handle_toggle' ) );
 		add_action( 'wp_ajax_wpmh_save_watermark_settings', array( $this, 'handle_save_watermark_settings' ) );
-		add_action( 'admin_notices', array( $this, 'render_watermark_notice' ) );
-	}
-
-	/**
-	 * Render watermark notice from transient (Issue 2 fix)
-	 */
-	public function render_watermark_notice() {
-		// Only show on plugin settings page
-		$screen = get_current_screen();
-		if ( ! $screen || 'toplevel_page_webp-media-handler' !== $screen->id ) {
-			return;
-		}
-
-		$notice = get_transient( 'wpmh_watermark_notice' );
-		if ( ! $notice || ! is_array( $notice ) ) {
-			return;
-		}
-
-		// Delete transient after displaying
-		delete_transient( 'wpmh_watermark_notice' );
-
-		$type = isset( $notice['type'] ) ? $notice['type'] : 'success';
-		$message = isset( $notice['message'] ) ? $notice['message'] : '';
-
-		if ( empty( $message ) ) {
-			return;
-		}
-
-		$class = 'notice notice-' . esc_attr( $type ) . ' is-dismissible';
-		?>
-		<div class="<?php echo esc_attr( $class ); ?>">
-			<p><strong><?php echo esc_html( $message ); ?></strong></p>
-		</div>
-		<?php
 	}
 
 	/**
@@ -321,14 +287,29 @@ class WPMH_Admin {
 	 * Render watermark feature card
 	 */
 	private function render_watermark_card() {
+		// Issue 2: Defensive migration - normalize watermark_image_id to scalar
+		$watermark_id_raw = $this->settings->get( 'watermark_image_id', 0 );
+		if ( is_array( $watermark_id_raw ) ) {
+			// If array, take the last element and save as scalar
+			$watermark_id = ! empty( $watermark_id_raw ) ? absint( end( $watermark_id_raw ) ) : 0;
+			$this->settings->set( 'watermark_image_id', $watermark_id );
+		} else {
+			$watermark_id = absint( $watermark_id_raw );
+		}
+
 		$enabled = $this->settings->get( 'image_watermark', false );
-		$watermark_id = $this->settings->get( 'watermark_image_id', 0 );
 		$watermark_size = $this->settings->get( 'watermark_size', 100 );
 		$watermark_position = $this->settings->get( 'watermark_position', 'bottom-right' );
 		$target_mode = $this->settings->get( 'watermark_target_mode', 'selected' );
 		
 		$log = $this->settings->get_action_log( 'apply_watermark' );
 		$last_run = $log ? $log['timestamp'] : '';
+
+		// Issue 1: Read inline notice from transient
+		$inline_notice = get_transient( 'wpmh_watermark_notice' );
+		if ( $inline_notice && is_array( $inline_notice ) ) {
+			delete_transient( 'wpmh_watermark_notice' );
+		}
 		?>
 		<div class="wpmh-feature-card wpmh-watermark-card">
 			<div class="wpmh-feature-header">
@@ -445,6 +426,13 @@ class WPMH_Admin {
 						<?php esc_html_e( 'Apply Watermark', 'webp-media-handler' ); ?>
 					</button>
 					<div class="wpmh-action-status" id="wpmh-status-apply_watermark"></div>
+					<?php if ( ! empty( $inline_notice ) && isset( $inline_notice['message'] ) ) : ?>
+						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice wpmh-inline-notice-<?php echo esc_attr( isset( $inline_notice['type'] ) ? $inline_notice['type'] : 'success' ); ?>">
+							<?php echo esc_html( $inline_notice['message'] ); ?>
+						</div>
+					<?php else : ?>
+						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice" style="display: none;"></div>
+					<?php endif; ?>
 				</div>
 			</div>
 		</div>
@@ -470,7 +458,13 @@ class WPMH_Admin {
 			
 			// Validate and sanitize value based on setting
 			if ( 'watermark_image_id' === $setting ) {
-				$value = absint( $value );
+				// Issue 2: Ensure watermark_image_id is ALWAYS a scalar (single value), never an array
+				if ( is_array( $value ) ) {
+					// If array received, take last element and normalize to scalar
+					$value = ! empty( $value ) ? absint( end( $value ) ) : 0;
+				} else {
+					$value = absint( $value );
+				}
 			}
 			
 			$this->settings->set( $setting, $value );
@@ -495,7 +489,14 @@ class WPMH_Admin {
 					unset( $settings['watermark_target_mode'] );
 				}
 			}
-			
+			// Issue 2: Ensure watermark_image_id is scalar before saving
+			if ( isset( $settings['watermark_image_id'] ) ) {
+				if ( is_array( $settings['watermark_image_id'] ) ) {
+					$settings['watermark_image_id'] = ! empty( $settings['watermark_image_id'] ) ? absint( end( $settings['watermark_image_id'] ) ) : 0;
+				} else {
+					$settings['watermark_image_id'] = absint( $settings['watermark_image_id'] );
+				}
+			}
 			foreach ( $settings as $key => $value ) {
 				$this->settings->set( $key, $value );
 			}
