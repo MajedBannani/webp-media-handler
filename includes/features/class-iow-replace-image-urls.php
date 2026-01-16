@@ -441,6 +441,13 @@ class WPMH_Replace_Image_URLs {
 
 			$last_step = 'check_cursor_stuck';
 			$context['last_step'] = $last_step;
+			
+			// Include DB errors in context if any
+			global $wpdb;
+			if ( ! empty( $wpdb->last_error ) ) {
+				$context['db_last_error'] = $wpdb->last_error;
+				$context['db_last_query'] = $wpdb->last_query;
+			}
 
 			// Check for infinite loop (cursor not advancing)
 			if ( $state['last_id'] === $state['last_id_check'] && $state['last_id'] > 0 ) {
@@ -551,7 +558,7 @@ class WPMH_Replace_Image_URLs {
 				$state['last_id_check'] = 0;
 				$state['stuck_count'] = 0;
 
-				if ( $state['current_table_index'] < count( $state['tables'] ) ) {
+				if ( $state['current_table_index'] < ( is_countable( $state['tables'] ) ? count( $state['tables'] ) : 0 ) ) {
 					$state['current_table'] = $state['tables'][ $state['current_table_index'] ];
 					$this->save_job_state( $state );
 
@@ -603,6 +610,15 @@ class WPMH_Replace_Image_URLs {
 			$context['last_step'] = $last_step;
 			$context['exception_class'] = get_class( $e );
 
+			// Include DB errors in error message if available
+			global $wpdb;
+			$error_message = __( 'Batch processing error: ', 'webp-media-handler' ) . $e->getMessage();
+			if ( ! empty( $wpdb->last_error ) ) {
+				$error_message .= ' [DB Error: ' . esc_html( $wpdb->last_error ) . ']';
+				$context['db_last_error'] = $wpdb->last_error;
+				$context['db_last_query'] = $wpdb->last_query;
+			}
+			
 			$payload = $this->build_error_payload( $e, $context );
 			$this->write_debug_log( $payload );
 
@@ -611,7 +627,7 @@ class WPMH_Replace_Image_URLs {
 			}
 
 			wp_send_json_error( array_merge(
-				array( 'message' => __( 'Batch processing error: ', 'webp-media-handler' ) . $e->getMessage() ),
+				array( 'message' => $error_message ),
 				array( 'debug' => $payload, 'no_retry' => false )
 			) );
 		} catch ( Error $e ) {
@@ -697,7 +713,7 @@ class WPMH_Replace_Image_URLs {
 	 */
 	private function build_audit_summary( $audit_log ) {
 		$summary = array(
-			'total_changes' => count( $audit_log ),
+			'total_changes' => is_countable( $audit_log ) ? count( $audit_log ) : 0,
 			'by_table' => array(),
 			'top_keys' => array(),
 		);
@@ -743,7 +759,7 @@ class WPMH_Replace_Image_URLs {
 	 */
 	private function add_audit_entry( $entry ) {
 		// Limit audit log size to prevent memory issues (keep last 10000 entries)
-		if ( count( $this->audit_log ) >= 10000 ) {
+		if ( ( is_countable( $this->audit_log ) ? count( $this->audit_log ) : 0 ) >= 10000 ) {
 			$this->audit_log = array_slice( $this->audit_log, -9000 ); // Keep last 9000, allow 1000 more
 		}
 		$this->audit_log[] = $entry;
@@ -882,8 +898,26 @@ class WPMH_Replace_Image_URLs {
 				LIMIT %d",
 				$last_id,
 				$this->batch_size
-			)
+			),
+			OBJECT
 		);
+
+		// PHP 8+ strictness: $wpdb->get_results() can return null on error
+		if ( ! is_array( $posts ) ) {
+			// Log DB error for debugging
+			$db_error_context = array(
+				'last_step' => 'db_query_posts',
+				'action' => 'wpmh_run_replace_batch',
+				'table' => 'posts',
+				'db_last_error' => $wpdb->last_error,
+				'db_last_query' => $wpdb->last_query,
+			);
+			$this->write_debug_log( array_merge( $db_error_context, array(
+				'error_message' => 'DB query returned null/false in process_posts',
+				'error_type' => 'DBQueryError',
+			) ) );
+			$posts = array(); // Normalize to empty array
+		}
 
 		if ( empty( $posts ) ) {
 			return array(
@@ -898,7 +932,7 @@ class WPMH_Replace_Image_URLs {
 		}
 
 		$rows_updated = 0;
-		$rows_scanned = count( $posts );
+		$rows_scanned = is_countable( $posts ) ? count( $posts ) : 0;
 		$replacements = 0;
 
 		foreach ( $posts as $post ) {
@@ -949,7 +983,7 @@ class WPMH_Replace_Image_URLs {
 		$state['stats']['tables']['posts']['updated'] += $rows_updated;
 		$state['stats']['replaced'] += $replacements;
 
-		$completed = ( count( $posts ) < $this->batch_size );
+		$completed = ( ( is_countable( $posts ) ? count( $posts ) : 0 ) < $this->batch_size );
 
 		return array(
 			'completed' => $completed,
@@ -995,8 +1029,14 @@ class WPMH_Replace_Image_URLs {
 				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
 				'%' . $wpdb->esc_like( '.PNG' ) . '%',
 				$this->batch_size
-			)
+			),
+			OBJECT
 		);
+
+		// PHP 8+ strictness: normalize null/false to empty array
+		if ( ! is_array( $rows ) ) {
+			$rows = array();
+		}
 
 		return $this->process_meta_table( $rows, 'postmeta', $state, $dry_run, 'update_post_meta', 'post_id' );
 	}
@@ -1030,11 +1070,29 @@ class WPMH_Replace_Image_URLs {
 			$wpdb->prepare(
 				"SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s",
 				$wpdb->esc_like( 'theme_mods_' ) . '%'
-			)
+			),
+			OBJECT
 		);
 
+		// PHP 8+ strictness: $wpdb->get_results() can return null on error
+		if ( ! is_array( $theme_mods_options ) ) {
+			// Log DB error for debugging
+			$db_error_context = array(
+				'last_step' => 'db_query_theme_mods',
+				'action' => 'wpmh_run_replace_batch',
+				'table' => 'theme_mods',
+				'db_last_error' => $wpdb->last_error,
+				'db_last_query' => $wpdb->last_query,
+			);
+			$this->write_debug_log( array_merge( $db_error_context, array(
+				'error_message' => 'DB query returned null/false in process_theme_mods',
+				'error_type' => 'DBQueryError',
+			) ) );
+			$theme_mods_options = array(); // Normalize to empty array
+		}
+
 		$rows_updated = 0;
-		$rows_scanned = count( $theme_mods_options );
+		$rows_scanned = is_countable( $theme_mods_options ) ? count( $theme_mods_options ) : 0;
 		$replacements = 0;
 
 		foreach ( $theme_mods_options as $mod_option ) {
@@ -1280,7 +1338,7 @@ class WPMH_Replace_Image_URLs {
 		$dry_run = $state['dry_run'];
 		$last_id = $state['last_id'];
 
-			$rows = $wpdb->get_results(
+		$rows = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT option_id as meta_id, option_name as meta_key, option_value as meta_value FROM {$wpdb->options}
 				WHERE option_id > %d
@@ -1291,6 +1349,7 @@ class WPMH_Replace_Image_URLs {
 				ORDER BY option_id ASC
 				LIMIT %d",
 				$last_id,
+				$wpdb->esc_like( 'theme_mods_' ) . '%',
 				'%' . $wpdb->esc_like( '.jpg' ) . '%',
 				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
 				'%' . $wpdb->esc_like( '.png' ) . '%',
@@ -1298,11 +1357,29 @@ class WPMH_Replace_Image_URLs {
 				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
 				'%' . $wpdb->esc_like( '.PNG' ) . '%',
 				$this->batch_size
-			)
+			),
+			OBJECT
 		);
 
+		// PHP 8+ strictness: $wpdb->get_results() can return null on error
+		if ( ! is_array( $rows ) ) {
+			// Log DB error for debugging
+			$db_error_context = array(
+				'last_step' => 'db_query_options',
+				'action' => 'wpmh_run_replace_batch',
+				'table' => 'options',
+				'db_last_error' => $wpdb->last_error,
+				'db_last_query' => $wpdb->last_query,
+			);
+			$this->write_debug_log( array_merge( $db_error_context, array(
+				'error_message' => 'DB query returned null/false in process_options',
+				'error_type' => 'DBQueryError',
+			) ) );
+			$rows = array(); // Normalize to empty array for safe iteration
+		}
+
 		$rows_updated = 0;
-		$rows_scanned = count( $rows );
+		$rows_scanned = is_countable( $rows ) ? count( $rows ) : 0;
 		$replacements = 0;
 
 		if ( empty( $rows ) ) {
@@ -1356,7 +1433,7 @@ class WPMH_Replace_Image_URLs {
 		$state['stats']['tables']['options']['updated'] += $rows_updated;
 		$state['stats']['replaced'] += $replacements;
 
-		$completed = ( count( $rows ) < $this->batch_size );
+		$completed = ( ( is_countable( $rows ) ? count( $rows ) : 0 ) < $this->batch_size );
 
 		return array(
 			'completed' => $completed,
@@ -1412,8 +1489,14 @@ class WPMH_Replace_Image_URLs {
 				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
 				'%' . $wpdb->esc_like( '.PNG' ) . '%',
 				$this->batch_size
-			)
+			),
+			OBJECT
 		);
+
+		// PHP 8+ strictness: normalize null/false to empty array
+		if ( ! is_array( $rows ) ) {
+			$rows = array();
+		}
 
 		return $this->process_meta_table( $rows, 'termmeta', $state, $state['dry_run'], 'update_term_meta', 'post_id' );
 	}
@@ -1445,8 +1528,14 @@ class WPMH_Replace_Image_URLs {
 				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
 				'%' . $wpdb->esc_like( '.PNG' ) . '%',
 				$this->batch_size
-			)
+			),
+			OBJECT
 		);
+
+		// PHP 8+ strictness: normalize null/false to empty array
+		if ( ! is_array( $rows ) ) {
+			$rows = array();
+		}
 
 		return $this->process_meta_table( $rows, 'usermeta', $state, $state['dry_run'], 'update_user_meta', 'post_id' );
 	}
@@ -1479,11 +1568,17 @@ class WPMH_Replace_Image_URLs {
 				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
 				'%' . $wpdb->esc_like( '.PNG' ) . '%',
 				$this->batch_size
-			)
+			),
+			OBJECT
 		);
 
+		// PHP 8+ strictness: normalize null/false to empty array
+		if ( ! is_array( $rows ) ) {
+			$rows = array();
+		}
+
 		$rows_updated = 0;
-		$rows_scanned = count( $rows );
+		$rows_scanned = is_countable( $rows ) ? count( $rows ) : 0;
 		$replacements = 0;
 
 		if ( empty( $rows ) ) {
@@ -1536,7 +1631,7 @@ class WPMH_Replace_Image_URLs {
 		$state['stats']['tables']['terms']['updated'] += $rows_updated;
 		$state['stats']['replaced'] += $replacements;
 
-		$completed = ( count( $rows ) < $this->batch_size );
+		$completed = ( ( is_countable( $rows ) ? count( $rows ) : 0 ) < $this->batch_size );
 
 		return array(
 			'completed' => $completed,
@@ -1581,11 +1676,17 @@ class WPMH_Replace_Image_URLs {
 				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
 				'%' . $wpdb->esc_like( '.PNG' ) . '%',
 				$this->batch_size
-			)
+			),
+			OBJECT
 		);
 
+		// PHP 8+ strictness: normalize null/false to empty array
+		if ( ! is_array( $rows ) ) {
+			$rows = array();
+		}
+
 		$rows_updated = 0;
-		$rows_scanned = count( $rows );
+		$rows_scanned = is_countable( $rows ) ? count( $rows ) : 0;
 		$replacements = 0;
 
 		if ( empty( $rows ) ) {
@@ -1638,7 +1739,7 @@ class WPMH_Replace_Image_URLs {
 		$state['stats']['tables']['term_taxonomy']['updated'] += $rows_updated;
 		$state['stats']['replaced'] += $replacements;
 
-		$completed = ( count( $rows ) < $this->batch_size );
+		$completed = ( ( is_countable( $rows ) ? count( $rows ) : 0 ) < $this->batch_size );
 
 		return array(
 			'completed' => $completed,
@@ -1667,8 +1768,13 @@ class WPMH_Replace_Image_URLs {
 	 * @return array Result array.
 	 */
 	private function process_meta_table( $rows, $table_name, $state, $dry_run, $update_func, $id_field ) {
+		// PHP 8+ strictness: normalize null/false to empty array
+		if ( ! is_array( $rows ) ) {
+			$rows = array();
+		}
+		
 		$rows_updated = 0;
-		$rows_scanned = count( $rows );
+		$rows_scanned = is_countable( $rows ) ? count( $rows ) : 0;
 		$replacements = 0;
 
 		if ( empty( $rows ) ) {
@@ -1701,7 +1807,7 @@ class WPMH_Replace_Image_URLs {
 		$state['stats']['tables'][ $table_name ]['updated'] += $rows_updated;
 		$state['stats']['replaced'] += $replacements;
 
-		$completed = ( count( $rows ) < $this->batch_size );
+		$completed = ( $rows_scanned < $this->batch_size );
 
 		return array(
 			'completed' => $completed,
