@@ -467,26 +467,19 @@ class WPMH_Replace_Image_URLs {
 		$dry_run = $state['dry_run'];
 		$last_id = $state['last_id'];
 
-		// Get total count (approximate, for progress)
-		$total_query = "SELECT COUNT(*) FROM {$wpdb->posts} WHERE ID > %d";
+		// Get total count (approximate, for progress) - matches snippet: ALL post statuses/types
+		$total_query = "SELECT COUNT(*) FROM {$wpdb->posts} WHERE ID > %d AND (post_content REGEXP '\\.(jpg|jpeg|png)' OR post_excerpt REGEXP '\\.(jpg|jpeg|png)')";
 		$total = $wpdb->get_var( $wpdb->prepare( $total_query, $last_id ) );
 
-		// Get batch using cursor
+		// Get batch using cursor - matches snippet pattern but for ALL post statuses/types
 		$posts = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT ID, post_content, post_excerpt FROM {$wpdb->posts}
 				WHERE ID > %d
-				  AND (post_content LIKE %s OR post_content LIKE %s OR post_content LIKE %s
-				       OR post_excerpt LIKE %s OR post_excerpt LIKE %s OR post_excerpt LIKE %s)
+				  AND (post_content REGEXP '\\.(jpg|jpeg|png)' OR post_excerpt REGEXP '\\.(jpg|jpeg|png)')
 				ORDER BY ID ASC
 				LIMIT %d",
 				$last_id,
-				'%' . $wpdb->esc_like( '.jpg' ) . '%',
-				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
-				'%' . $wpdb->esc_like( '.png' ) . '%',
-				'%' . $wpdb->esc_like( '.jpg' ) . '%',
-				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
-				'%' . $wpdb->esc_like( '.png' ) . '%',
 				$this->batch_size
 			)
 		);
@@ -643,7 +636,24 @@ class WPMH_Replace_Image_URLs {
 
 			if ( $has_changes ) {
 				if ( ! $dry_run ) {
-					update_option( $mod_option->option_name, $new_mods );
+					// Extract theme name from option_name (theme_mods_{theme_name})
+					$theme_name = str_replace( 'theme_mods_', '', $mod_option->option_name );
+					$current_theme = get_option( 'stylesheet' );
+					
+					// Snippet uses get_theme_mods() which only gets active theme mods
+					// For active theme, use set_theme_mod() for each changed key (like snippet)
+					// For other themes, update the option directly
+					if ( $theme_name === $current_theme ) {
+						// Active theme - use set_theme_mod() like snippet
+						foreach ( $new_mods as $key => $new_value ) {
+							if ( ! isset( $theme_mods[ $key ] ) || $theme_mods[ $key ] !== $new_value ) {
+								set_theme_mod( $key, $new_value );
+							}
+						}
+					} else {
+						// Other theme - update option directly (can't use set_theme_mod for inactive themes)
+						update_option( $mod_option->option_name, $new_mods );
+					}
 				}
 				$rows_updated++;
 			}
@@ -686,44 +696,60 @@ class WPMH_Replace_Image_URLs {
 		}
 
 		$processed = array();
+		$upload_dir = wp_upload_dir();
 
 		foreach ( $mods as $key => $value ) {
 			if ( is_array( $value ) ) {
 				$processed[ $key ] = $this->process_theme_mods_array( $value, $has_changes, $replacements );
 			} elseif ( is_numeric( $value ) && $value > 0 ) {
-				// Potential attachment ID - check if it's a valid attachment and has WebP
+				// Attachment ID - check if it's a valid attachment and has WebP
 				$attachment_id = absint( $value );
 				$attachment_file = get_attached_file( $attachment_id );
 				
-				if ( $attachment_file && file_exists( $attachment_file ) ) {
-					// Check if WebP version exists
-					$webp_file = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $attachment_file );
-					if ( file_exists( $webp_file ) ) {
-						// Get WebP URL - if the attachment has been converted to WebP, 
-						// the URL should already point to WebP, but we'll use the WebP file URL
-						$upload_dir = wp_upload_dir();
-						$relative_path = str_replace( $upload_dir['basedir'], '', $webp_file );
-						$webp_url = $upload_dir['baseurl'] . $relative_path;
-						
-						// Update the mod value to use the WebP URL instead of ID
-						// This matches snippet behavior: convert IDs to WebP URLs when WebP exists
-						$processed[ $key ] = $webp_url;
-						$has_changes = true;
-						$replacements++;
-					} else {
-						$processed[ $key ] = $value;
-					}
+				if ( ! $attachment_file || ! file_exists( $attachment_file ) ) {
+					$processed[ $key ] = $value;
+					continue;
+				}
+
+				// Check if it's an image file
+				if ( ! preg_match( '/\.(jpg|jpeg|png)$/i', $attachment_file ) ) {
+					$processed[ $key ] = $value;
+					continue;
+				}
+
+				// Check if WebP version exists
+				$webp_file = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $attachment_file );
+				if ( ! file_exists( $webp_file ) ) {
+					$processed[ $key ] = $value;
+					continue;
+				}
+
+				// Convert WebP file path to URL
+				$upload_dir = wp_upload_dir();
+				$webp_url = str_replace(
+					$upload_dir['basedir'],
+					$upload_dir['baseurl'],
+					$webp_file
+				);
+
+				// Try to find WebP attachment ID (like snippet does)
+				$webp_id = attachment_url_to_postid( $webp_url );
+				if ( $webp_id ) {
+					// Update to WebP attachment ID
+					$processed[ $key ] = $webp_id;
+					$has_changes = true;
+					$replacements++;
 				} else {
-					// Not a valid attachment, keep as-is
+					// No attachment ID found for WebP URL, keep original ID
 					$processed[ $key ] = $value;
 				}
-			} elseif ( is_string( $value ) ) {
-				// Process URL strings
+			} elseif ( is_string( $value ) && ! empty( $value ) ) {
+				// Direct URL string (matches snippet: if (is_string($value)) set_theme_mod($key, $replace_with_webp($value)))
 				$new_value = $this->replace_urls_in_value( $value );
 				if ( $new_value !== $value ) {
+					$processed[ $key ] = $new_value;
 					$has_changes = true;
 					$replacements += $this->count_replacements( $value, $new_value );
-					$processed[ $key ] = $new_value;
 				} else {
 					$processed[ $key ] = $value;
 				}
@@ -1182,26 +1208,31 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Recursively replace URLs in arrays and objects
+	 * Recursively replace URLs in arrays and objects (matches snippet walker pattern)
 	 *
 	 * @param mixed $data Data to process.
 	 * @param array $state Job state (for sample collection).
 	 * @return mixed Processed data.
 	 */
 	private function replace_urls_recursive( $data, &$state = null ) {
+		// Snippet pattern: if (is_string($item)) return $replace_with_webp($item)
+		if ( is_string( $data ) ) {
+			return $this->replace_urls_in_string( $data, $state );
+		}
+
+		// Snippet pattern: if (is_array($item)) foreach ($item as $k => $v) $item[$k] = $walker($v)
 		if ( is_array( $data ) ) {
 			foreach ( $data as $key => $value ) {
 				$data[ $key ] = $this->replace_urls_recursive( $value, $state );
 			}
 			return $data;
 		} elseif ( is_object( $data ) ) {
+			// Handle objects (not in snippet, but needed for WordPress data)
 			$new_object = new \stdClass();
 			foreach ( $data as $key => $value ) {
 				$new_object->$key = $this->replace_urls_recursive( $value, $state );
 			}
 			return $new_object;
-		} elseif ( is_string( $data ) ) {
-			return $this->replace_urls_in_string( $data, $state );
 		}
 
 		return $data;
@@ -1249,10 +1280,11 @@ class WPMH_Replace_Image_URLs {
 			$content
 		);
 
-		// Main URL patterns
+		// Main URL patterns - matches snippet pattern: /(https?:\/\/[^\s"\')]+?\.(jpg|jpeg|png))/i
+		// Extended to handle relative URLs and preserve query strings/hashes
 		$patterns = array(
-			'/(https?:\/\/[^\s"\'<>\[\]{}()]+?)\.(jpg|jpeg|png)(\?[^\s"\'<>\[\]{}()]*)?(#[^\s"\'<>\[\]{}()]*)?/i',
-			'/(\/[^\s"\'<>\[\]{}()]+?)\.(jpg|jpeg|png)(\?[^\s"\'<>\[\]{}()]*)?(#[^\s"\'<>\[\]{}()]*)?/i',
+			'/(https?:\/\/[^\s"\'<>\[\]{}()]+?\.(jpg|jpeg|png))/i',
+			'/(\/[^\s"\'<>\[\]{}()]+?\.(jpg|jpeg|png))/i',
 		);
 
 		foreach ( $patterns as $pattern ) {
@@ -1319,23 +1351,17 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Callback for URL replacement
+	 * Callback for URL replacement (matches snippet behavior)
 	 *
 	 * @param array $matches Matched URL parts.
 	 * @return string Replacement URL or original if WebP doesn't exist.
 	 */
 	private function replace_url_callback( $matches ) {
-		$full_url = $matches[0];
-		$base_url = $matches[1];
-		$extension = strtolower( $matches[2] );
-		$query = isset( $matches[3] ) ? $matches[3] : '';
-		$fragment = isset( $matches[4] ) ? $matches[4] : '';
-
-		$original_url = $base_url . '.' . $extension . $query . $fragment;
+		$original_url = $matches[0]; // Full matched URL
 
 		// Skip if already .webp
 		if ( preg_match( '/\.webp($|[?#])/i', $original_url ) ) {
-			return $full_url;
+			return $original_url;
 		}
 
 		$upload_dir = wp_upload_dir();
@@ -1343,6 +1369,8 @@ class WPMH_Replace_Image_URLs {
 		$site_url = site_url();
 		$cdn_base_url = apply_filters( 'wpmh_cdn_base_url', '' );
 
+		// Check if URL belongs to this site (like snippet - only checks upload_dir baseurl)
+		// Snippet only processes URLs from upload_dir, but we extend to home_url/site_url for completeness
 		$upload_baseurl_lower = strtolower( $upload_dir['baseurl'] );
 		$home_url_lower = strtolower( $home_url );
 		$site_url_lower = strtolower( $site_url );
@@ -1352,13 +1380,13 @@ class WPMH_Replace_Image_URLs {
 		$is_home_url = strpos( $original_url_lower, $home_url_lower ) !== false;
 		$is_site_url = strpos( $original_url_lower, $site_url_lower ) !== false;
 		$is_cdn_url = ! empty( $cdn_base_url ) && strpos( $original_url_lower, strtolower( $cdn_base_url ) ) !== false;
-		$is_relative_url = ( '/' === substr( $original_url, 0, 1 ) );
 		
-		if ( ! $is_upload_url && ! $is_home_url && ! $is_site_url && ! $is_cdn_url && ! $is_relative_url ) {
-			return $full_url; // External URL, skip
+		// Snippet only processes upload URLs, but requirements say to also check home_url/site_url
+		if ( ! $is_upload_url && ! $is_home_url && ! $is_site_url && ! $is_cdn_url ) {
+			return $original_url; // External URL, skip
 		}
 
-		// Convert URL to file path
+		// Convert URL to file path (like snippet)
 		$file_path = '';
 		if ( $is_upload_url ) {
 			$file_path = str_replace( $upload_dir['baseurl'], $upload_dir['basedir'], $original_url );
@@ -1367,11 +1395,9 @@ class WPMH_Replace_Image_URLs {
 		} elseif ( $is_home_url || $is_site_url ) {
 			$relative_path = str_replace( array( $home_url, $site_url ), '', $original_url );
 			$file_path = ABSPATH . ltrim( $relative_path, '/' );
-		} elseif ( $is_relative_url ) {
-			$file_path = ABSPATH . ltrim( $original_url, '/' );
 		}
 
-		// Remove query string and fragment
+		// Remove query string and fragment from path
 		$path_parts = explode( '?', $file_path, 2 );
 		$file_path = $path_parts[0];
 		$path_parts = explode( '#', $file_path, 2 );
@@ -1380,37 +1406,16 @@ class WPMH_Replace_Image_URLs {
 		// Normalize path separators
 		$file_path = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $file_path );
 
-		// Check file existence
-		$require_local_file = apply_filters( 'wpmh_require_local_file', true );
-		if ( $require_local_file && ! file_exists( $file_path ) ) {
-			return $full_url;
-		}
-
-		// Check if WebP version exists
+		// Check if WebP version exists (like snippet)
 		$webp_path = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $file_path );
-
-		if ( $require_local_file && ! file_exists( $webp_path ) ) {
-			return $full_url;
+		if ( ! file_exists( $webp_path ) ) {
+			return $original_url;
 		}
 
-		// Convert back to URL
-		if ( $is_upload_url ) {
-			$webp_url = str_replace( $upload_dir['basedir'], $upload_dir['baseurl'], $webp_path );
-		} elseif ( $is_cdn_url ) {
-			$webp_url = str_replace( $upload_dir['basedir'], $cdn_base_url, $webp_path );
-		} elseif ( $is_home_url || $is_site_url ) {
-			$relative_path = str_replace( ABSPATH, '', $webp_path );
-			$webp_url = ( $is_home_url ? $home_url : $site_url ) . '/' . str_replace( '\\', '/', ltrim( $relative_path, '/' ) );
-		} elseif ( $is_relative_url ) {
-			$relative_path = str_replace( ABSPATH, '', $webp_path );
-			$webp_url = '/' . str_replace( '\\', '/', ltrim( $relative_path, '/' ) );
-		} else {
-			return $full_url;
-		}
-
-		$webp_url = str_replace( '\\', '/', $webp_url );
+		// Replace extension in URL (preserving query string/hash like snippet)
+		$webp_url = preg_replace( '/\.(jpg|jpeg|png)(\?|#|$)/i', '.webp$2', $original_url );
 		
-		return $webp_url . $query . $fragment;
+		return $webp_url;
 	}
 
 	/**
