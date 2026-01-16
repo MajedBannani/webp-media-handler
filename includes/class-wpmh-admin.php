@@ -293,6 +293,12 @@ class WPMH_Admin {
 					<a href="#" id="wpmh-reset-replace-job" class="button" style="display: none; margin-left: 10px;">
 						<?php esc_html_e( 'Reset Job', 'webp-media-handler' ); ?>
 					</a>
+					<a href="#" id="wpmh-view-replace-log" class="button" style="margin-left: 10px;">
+						<?php esc_html_e( 'View Last Run Log', 'webp-media-handler' ); ?>
+					</a>
+					<a href="#" id="wpmh-rollback-replace" class="button button-secondary" style="margin-left: 10px;">
+						<?php esc_html_e( 'Rollback Last Run', 'webp-media-handler' ); ?>
+					</a>
 				<?php endif; ?>
 				<div class="wpmh-action-status" id="wpmh-status-<?php echo esc_attr( $action_key ); ?>"></div>
 			</div>

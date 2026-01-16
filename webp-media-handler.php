@@ -3,7 +3,7 @@
  * Plugin Name: WebP Media Handler
  * Plugin URI: https://github.com/MajedBannani/webp-media-handler
  * Description: Handle WebP image conversion and optimization with explicit control. Disable default image sizes, auto-convert new uploads, and convert existing media with clear action buttons.
- * Version: 1.0.33
+ * Version: 1.0.34
  * Author: Majed Talal
  * Author URI: https://github.com/MajedBannani
  * Update URI: https://github.com/MajedBannani/webp-media-handler/releases
@@ -22,7 +22,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Define plugin constants
-define( 'WPMH_VERSION', '1.0.33' );
+define( 'WPMH_VERSION', '1.0.34' );
 define( 'WPMH_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPMH_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'WPMH_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );

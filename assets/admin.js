@@ -64,6 +64,12 @@
 			
 			// Reset replace job button
 			$(document).on('click', '#wpmh-reset-replace-job', this.resetReplaceJob);
+			
+			// View log button
+			$(document).on('click', '#wpmh-view-replace-log', this.viewReplaceLog);
+			
+			// Rollback button
+			$(document).on('click', '#wpmh-rollback-replace', this.rollbackReplace);
 		},
 
 		/**
@@ -360,6 +366,98 @@
 				},
 				error: function() {
 					alert(wpmhAdmin.strings.error);
+				}
+			});
+		},
+
+		/**
+		 * View replace log
+		 */
+		viewReplaceLog: function(e) {
+			e.preventDefault();
+
+			var nonce = wpmhAdmin.nonces.replace_urls;
+
+			$.ajax({
+				url: wpmhAdmin.ajaxUrl,
+				type: 'POST',
+				data: {
+					action: 'wpmh_view_replace_log',
+					nonce: nonce
+				},
+				success: function(response) {
+					if (response.success && response.data.log) {
+						var log = response.data.log;
+						var summary = response.data.summary || {};
+						var message = 'Last Run Log\n';
+						message += 'Timestamp: ' + (log.timestamp || 'N/A') + '\n';
+						message += 'Dry Run: ' + (log.dry_run ? 'Yes' : 'No') + '\n';
+						message += 'Total Changes: ' + (log.changes ? log.changes.length : 0) + '\n\n';
+						
+						if (summary.by_table) {
+							message += 'By Table:\n';
+							for (var table in summary.by_table) {
+								message += '  ' + table + ': ' + summary.by_table[table] + '\n';
+							}
+							message += '\n';
+						}
+						
+						if (summary.top_keys && Object.keys(summary.top_keys).length > 0) {
+							message += 'Top Changed Keys:\n';
+							var count = 0;
+							for (var key in summary.top_keys) {
+								if (count++ >= 10) break; // Show top 10
+								message += '  ' + key + ': ' + summary.top_keys[key] + ' changes\n';
+							}
+						}
+						
+						alert(message);
+					} else {
+						alert('No log file found.');
+					}
+				},
+				error: function() {
+					alert(wpmhAdmin.strings.error);
+				}
+			});
+		},
+
+		/**
+		 * Rollback replace
+		 */
+		rollbackReplace: function(e) {
+			e.preventDefault();
+
+			if (!confirm('Rollback the last run? This will restore all changed values from the audit log. Continue?')) {
+				return;
+			}
+
+			var nonce = wpmhAdmin.nonces.replace_urls;
+			var $button = $('#wpmh-rollback-replace');
+			var statusId = '#wpmh-status-replace_urls';
+			var $status = $(statusId);
+
+			$button.prop('disabled', true);
+			$status.removeClass('success error').addClass('show info').text('Rolling back...');
+
+			$.ajax({
+				url: wpmhAdmin.ajaxUrl,
+				type: 'POST',
+				data: {
+					action: 'wpmh_rollback_replace',
+					nonce: nonce
+				},
+				success: function(response) {
+					if (response.success) {
+						$status.removeClass('info error').addClass('show success').text(response.data.message);
+					} else {
+						$status.removeClass('info success').addClass('show error').text(response.data.message || wpmhAdmin.strings.error);
+					}
+					$button.prop('disabled', false);
+				},
+				error: function() {
+					$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error);
+					$button.prop('disabled', false);
 				}
 			});
 		},

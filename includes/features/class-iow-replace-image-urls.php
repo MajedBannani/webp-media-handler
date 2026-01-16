@@ -40,6 +40,26 @@ class WPMH_Replace_Image_URLs {
 	private $max_execution_time = 10;
 
 	/**
+	 * Protected keys that must remain as attachment IDs (never converted to URLs)
+	 * These are WordPress core theme_mod keys that must always be integers
+	 *
+	 * @var array
+	 */
+	private $protected_id_keys = array(
+		'custom_logo',
+		'site_icon',
+		'header_image',
+		'background_image',
+	);
+
+	/**
+	 * Audit log storage
+	 *
+	 * @var array
+	 */
+	private $audit_log = array();
+
+	/**
 	 * Constructor
 	 *
 	 * @param WPMH_Settings_Manager $settings Settings manager instance.
@@ -57,6 +77,8 @@ class WPMH_Replace_Image_URLs {
 		add_action( 'wp_ajax_wpmh_start_replace_job', array( $this, 'handle_start_job' ) );
 		add_action( 'wp_ajax_wpmh_run_replace_batch', array( $this, 'handle_run_batch' ) );
 		add_action( 'wp_ajax_wpmh_reset_replace_job', array( $this, 'handle_reset_job' ) );
+		add_action( 'wp_ajax_wpmh_rollback_replace', array( $this, 'handle_rollback' ) );
+		add_action( 'wp_ajax_wpmh_view_replace_log', array( $this, 'handle_view_log' ) );
 	}
 
 	/**
@@ -119,6 +141,9 @@ class WPMH_Replace_Image_URLs {
 			// Initialize job state - process theme_mods separately from options for special handling
 			$tables = array( 'posts', 'theme_mods', 'options', 'postmeta', 'termmeta', 'usermeta', 'terms', 'term_taxonomy' );
 
+			// Initialize audit log
+			$this->audit_log = array();
+
 			$state = array(
 				'dry_run' => $dry_run,
 				'tables' => $tables,
@@ -134,6 +159,7 @@ class WPMH_Replace_Image_URLs {
 				),
 				'samples' => array(), // Max 10 samples for dry-run
 				'started_at' => time(),
+				'audit_log' => array(), // Store audit log in state
 			);
 
 			// Initialize table stats
@@ -245,7 +271,17 @@ class WPMH_Replace_Image_URLs {
 				return;
 			}
 
+			// Restore audit log from state
+			if ( ! empty( $state['audit_log'] ) ) {
+				$this->audit_log = $state['audit_log'];
+			} else {
+				$this->audit_log = array();
+			}
+
 			$batch_result = call_user_func( array( $this, $method_name ), $state );
+
+			// Save audit log back to state
+			$batch_result['state']['audit_log'] = $this->audit_log;
 
 			// Check execution time
 			$elapsed = microtime( true ) - $start_time;
@@ -341,11 +377,107 @@ class WPMH_Replace_Image_URLs {
 		}
 		$state['stats']['replaced'] = $total_replaced;
 
+		// Save audit log to file and option
+		if ( ! empty( $state['audit_log'] ) ) {
+			$this->save_audit_log( $state['audit_log'], $state['dry_run'] );
+		}
+
 		// Save final log
 		$this->settings->log_action( 'replace_image_urls', array( 'stats' => $state['stats'] ) );
 
 		// Delete job state
 		$this->delete_job_state();
+	}
+
+	/**
+	 * Save audit log to file and option
+	 *
+	 * @param array $audit_log Audit log entries.
+	 * @param bool  $dry_run Whether this was a dry run.
+	 */
+	private function save_audit_log( $audit_log, $dry_run = false ) {
+		$upload_dir = wp_upload_dir();
+		$log_dir = $upload_dir['basedir'] . '/webp-media-handler';
+		
+		// Create directory if it doesn't exist
+		if ( ! file_exists( $log_dir ) ) {
+			wp_mkdir_p( $log_dir );
+		}
+
+		$log_file = $log_dir . '/replace-urls-last-run.json';
+		
+		$log_data = array(
+			'timestamp' => current_time( 'mysql' ),
+			'dry_run' => $dry_run,
+			'changes' => $audit_log,
+			'summary' => $this->build_audit_summary( $audit_log ),
+		);
+
+		// Save to file
+		file_put_contents( $log_file, wp_json_encode( $log_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+
+		// Save lightweight summary to option
+		update_option( 'wpmh_replace_urls_last_run_summary', $log_data['summary'], false );
+	}
+
+	/**
+	 * Build audit summary (counts per table + top changed keys)
+	 *
+	 * @param array $audit_log Audit log entries.
+	 * @return array Summary data.
+	 */
+	private function build_audit_summary( $audit_log ) {
+		$summary = array(
+			'total_changes' => count( $audit_log ),
+			'by_table' => array(),
+			'top_keys' => array(),
+		);
+
+		$key_counts = array();
+
+		foreach ( $audit_log as $entry ) {
+			$table = $entry['table'];
+			if ( ! isset( $summary['by_table'][ $table ] ) ) {
+				$summary['by_table'][ $table ] = 0;
+			}
+			$summary['by_table'][ $table ]++;
+
+			// Track option/meta keys
+			$key_name = '';
+			if ( 'options' === $table && isset( $entry['option_name'] ) ) {
+				$key_name = $entry['option_name'];
+			} elseif ( in_array( $table, array( 'postmeta', 'usermeta', 'termmeta' ), true ) && isset( $entry['meta_key'] ) ) {
+				$key_name = $table . ':' . $entry['meta_key'];
+			} elseif ( 'theme_mods' === $table && isset( $entry['mod_key'] ) ) {
+				$key_name = 'theme_mods:' . $entry['mod_key'];
+			}
+
+			if ( $key_name ) {
+				if ( ! isset( $key_counts[ $key_name ] ) ) {
+					$key_counts[ $key_name ] = 0;
+				}
+				$key_counts[ $key_name ]++;
+			}
+		}
+
+		// Get top 20 changed keys
+		arsort( $key_counts );
+		$summary['top_keys'] = array_slice( $key_counts, 0, 20, true );
+
+		return $summary;
+	}
+
+	/**
+	 * Add entry to audit log
+	 *
+	 * @param array $entry Audit log entry.
+	 */
+	private function add_audit_entry( $entry ) {
+		// Limit audit log size to prevent memory issues (keep last 10000 entries)
+		if ( count( $this->audit_log ) >= 10000 ) {
+			$this->audit_log = array_slice( $this->audit_log, -9000 ); // Keep last 9000, allow 1000 more
+		}
+		$this->audit_log[] = $entry;
 	}
 
 	/**
@@ -521,6 +653,18 @@ class WPMH_Replace_Image_URLs {
 			}
 
 			if ( $has_changes ) {
+				// Audit log
+				$audit_entry = array(
+					'table' => 'posts',
+					'primary_key' => $post->ID,
+					'column' => 'post_content/post_excerpt',
+					'before' => $this->truncate_for_log( $original_content . "\n---EXCERPT---\n" . $original_excerpt ),
+					'after' => $this->truncate_for_log( $new_content . "\n---EXCERPT---\n" . $new_excerpt ),
+					'replacements' => $replacements,
+				);
+				$this->add_audit_entry( $audit_entry );
+				$state['audit_log'][] = $audit_entry;
+
 				if ( ! $dry_run ) {
 					wp_update_post( array_merge( array( 'ID' => $post->ID ), $update_data ) );
 				}
@@ -632,7 +776,7 @@ class WPMH_Replace_Image_URLs {
 			}
 
 			$has_changes = false;
-			$new_mods = $this->process_theme_mods_array( $theme_mods, $has_changes, $replacements );
+			$new_mods = $this->process_theme_mods_array( $theme_mods, $has_changes, $replacements, $mod_option->option_name, $state );
 
 			if ( $has_changes ) {
 				if ( ! $dry_run ) {
@@ -690,7 +834,17 @@ class WPMH_Replace_Image_URLs {
 	 * @param int   $replacements Output parameter - count of replacements.
 	 * @return array Processed mods array.
 	 */
-	private function process_theme_mods_array( $mods, &$has_changes, &$replacements ) {
+	/**
+	 * Process theme_mods array, handling attachment IDs and URLs
+	 * CRITICAL: custom_logo and other protected keys must ALWAYS remain as integer attachment IDs
+	 *
+	 * @param array $mods Theme mods array.
+	 * @param bool  $has_changes Output parameter - set to true if changes made.
+	 * @param int   $replacements Output parameter - count of replacements.
+	 * @param string $theme_mod_option_name Optional theme mod option name for audit logging.
+	 * @return array Processed mods array.
+	 */
+	private function process_theme_mods_array( $mods, &$has_changes, &$replacements, $theme_mod_option_name = '', &$state = null ) {
 		if ( ! is_array( $mods ) ) {
 			return $mods;
 		}
@@ -698,11 +852,64 @@ class WPMH_Replace_Image_URLs {
 		$processed = array();
 		$upload_dir = wp_upload_dir();
 
+		// Allow filtering of protected keys
+		$protected_keys = apply_filters( 'wpmh_protected_theme_mod_keys', $this->protected_id_keys );
+
 		foreach ( $mods as $key => $value ) {
+			// CRITICAL FIX: Protect known WordPress core ID keys (must remain integers)
+			// Root cause: custom_logo was being converted from integer ID to URL string, breaking theme logo display
+			if ( in_array( $key, $protected_keys, true ) ) {
+				// This key must ALWAYS remain as an integer attachment ID
+				if ( is_numeric( $value ) && $value > 0 ) {
+					$attachment_id = absint( $value );
+					$attachment_file = get_attached_file( $attachment_id );
+					
+					if ( $attachment_file && file_exists( $attachment_file ) && preg_match( '/\.(jpg|jpeg|png)$/i', $attachment_file ) ) {
+						// Check if WebP version exists and has an attachment ID
+						$webp_file = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $attachment_file );
+						if ( file_exists( $webp_file ) ) {
+							$webp_url = str_replace( $upload_dir['basedir'], $upload_dir['baseurl'], $webp_file );
+							$webp_id = attachment_url_to_postid( $webp_url );
+							
+							if ( $webp_id && $webp_id > 0 ) {
+								// Only update if we have a valid WebP attachment ID
+								$processed[ $key ] = $webp_id;
+								$has_changes = true;
+								$replacements++;
+								
+			// Audit log (store in state)
+				$audit_entry = array(
+					'table' => 'theme_mods',
+					'option_name' => $theme_mod_option_name,
+					'mod_key' => $key,
+					'primary_key' => $theme_mod_option_name . ':' . $key,
+					'column' => 'theme_mod',
+					'before' => $attachment_id,
+					'after' => $webp_id,
+					'replacements' => 1,
+					'note' => 'Protected key updated: attachment ID converted to WebP attachment ID',
+				);
+				$this->add_audit_entry( $audit_entry );
+				$state['audit_log'][] = $audit_entry;
+								continue;
+							}
+						}
+					}
+					// Keep original ID if WebP attachment not found
+					$processed[ $key ] = $value;
+					continue;
+				} else {
+					// Protected key but not numeric - keep as-is (may already be corrupted, don't make it worse)
+					$processed[ $key ] = $value;
+					continue;
+				}
+			}
+
+			// Process nested arrays
 			if ( is_array( $value ) ) {
-				$processed[ $key ] = $this->process_theme_mods_array( $value, $has_changes, $replacements );
+				$processed[ $key ] = $this->process_theme_mods_array( $value, $has_changes, $replacements, $theme_mod_option_name, $state );
 			} elseif ( is_numeric( $value ) && $value > 0 ) {
-				// Attachment ID - check if it's a valid attachment and has WebP
+				// Non-protected attachment ID - check if it's a valid attachment and has WebP
 				$attachment_id = absint( $value );
 				$attachment_file = get_attached_file( $attachment_id );
 				
@@ -725,31 +932,61 @@ class WPMH_Replace_Image_URLs {
 				}
 
 				// Convert WebP file path to URL
-				$upload_dir = wp_upload_dir();
-				$webp_url = str_replace(
-					$upload_dir['basedir'],
-					$upload_dir['baseurl'],
-					$webp_file
-				);
+				$webp_url = str_replace( $upload_dir['basedir'], $upload_dir['baseurl'], $webp_file );
 
 				// Try to find WebP attachment ID (like snippet does)
 				$webp_id = attachment_url_to_postid( $webp_url );
-				if ( $webp_id ) {
-					// Update to WebP attachment ID
+				if ( $webp_id && $webp_id > 0 ) {
+					// Update to WebP attachment ID (must be valid ID, not URL)
 					$processed[ $key ] = $webp_id;
 					$has_changes = true;
 					$replacements++;
+					
+					// Audit log (store in state)
+					$audit_entry = array(
+						'table' => 'theme_mods',
+						'option_name' => $theme_mod_option_name,
+						'mod_key' => $key,
+						'primary_key' => $theme_mod_option_name . ':' . $key,
+						'column' => 'theme_mod',
+						'before' => $attachment_id,
+						'after' => $webp_id,
+						'replacements' => 1,
+					);
+					$this->add_audit_entry( $audit_entry );
 				} else {
-					// No attachment ID found for WebP URL, keep original ID
+					// No attachment ID found for WebP URL, keep original ID (never convert to URL)
 					$processed[ $key ] = $value;
 				}
 			} elseif ( is_string( $value ) && ! empty( $value ) ) {
-				// Direct URL string (matches snippet: if (is_string($value)) set_theme_mod($key, $replace_with_webp($value)))
+				// Direct URL string - but skip if it looks like it might be builder JSON/config
+				// Root cause analysis: Builder JSON (Bricks/Elementor) was being corrupted by URL replacement
+				// because URLs inside JSON were replaced, breaking JSON structure or escaping
+				if ( $this->should_skip_string_replacement( $key, $value, 'theme_mods' ) ) {
+					$processed[ $key ] = $value;
+					continue;
+				}
+
+				$original_value = $value;
 				$new_value = $this->replace_urls_in_value( $value );
-				if ( $new_value !== $value ) {
+				if ( $new_value !== $original_value ) {
 					$processed[ $key ] = $new_value;
 					$has_changes = true;
-					$replacements += $this->count_replacements( $value, $new_value );
+					$replacements += $this->count_replacements( $original_value, $new_value );
+					
+					// Audit log (store in state)
+					$audit_entry = array(
+						'table' => 'theme_mods',
+						'option_name' => $theme_mod_option_name,
+						'mod_key' => $key,
+						'primary_key' => $theme_mod_option_name . ':' . $key,
+						'column' => 'theme_mod',
+						'before' => $this->truncate_for_log( $original_value ),
+						'after' => $this->truncate_for_log( $new_value ),
+						'replacements' => $this->count_replacements( $original_value, $new_value ),
+					);
+					$this->add_audit_entry( $audit_entry );
+					$state['audit_log'][] = $audit_entry;
 				} else {
 					$processed[ $key ] = $value;
 				}
@@ -812,13 +1049,34 @@ class WPMH_Replace_Image_URLs {
 		}
 
 		foreach ( $rows as $row ) {
-			$new_value = $this->replace_urls_in_value( $row->meta_value, $state );
-			if ( $new_value !== $row->meta_value ) {
+			// Check if this option key should be skipped (builder JSON protection)
+			if ( $this->should_skip_string_replacement( $row->meta_key, $row->meta_value, 'options' ) ) {
+				$state['last_id'] = $row->meta_id;
+				continue;
+			}
+
+			$original_value = $row->meta_value;
+			$new_value = $this->replace_urls_in_value( $original_value, $state );
+			
+			if ( $new_value !== $original_value ) {
+				// Audit log
+				$audit_entry = array(
+					'table' => 'options',
+					'option_name' => $row->meta_key,
+					'primary_key' => $row->meta_key,
+					'column' => 'option_value',
+					'before' => $this->truncate_for_log( $original_value ),
+					'after' => $this->truncate_for_log( $new_value ),
+					'replacements' => $this->count_replacements( $original_value, $new_value ),
+				);
+				$this->add_audit_entry( $audit_entry );
+				$state['audit_log'][] = $audit_entry;
+
 				if ( ! $dry_run ) {
 					update_option( $row->meta_key, $new_value );
 				}
 				$rows_updated++;
-				$replacements += $this->count_replacements( $row->meta_value, $new_value );
+				$replacements += $this->count_replacements( $original_value, $new_value );
 			}
 
 			$state['last_id'] = $row->meta_id;
@@ -972,8 +1230,22 @@ class WPMH_Replace_Image_URLs {
 		}
 
 		foreach ( $rows as $row ) {
-			$new_description = $this->replace_urls_in_value( $row->description, $state );
-			if ( $new_description !== $row->description ) {
+			$original_description = $row->description;
+			$new_description = $this->replace_urls_in_value( $original_description, $state );
+			
+			if ( $new_description !== $original_description ) {
+				// Audit log
+				$audit_entry = array(
+					'table' => 'terms',
+					'primary_key' => $row->term_id,
+					'column' => 'description',
+					'before' => $this->truncate_for_log( $original_description ),
+					'after' => $this->truncate_for_log( $new_description ),
+					'replacements' => $this->count_replacements( $original_description, $new_description ),
+				);
+				$this->add_audit_entry( $audit_entry );
+				$state['audit_log'][] = $audit_entry;
+
 				if ( ! $dry_run ) {
 					$wpdb->update(
 						$wpdb->terms,
@@ -984,7 +1256,7 @@ class WPMH_Replace_Image_URLs {
 					);
 				}
 				$rows_updated++;
-				$replacements += $this->count_replacements( $row->description, $new_description );
+				$replacements += $this->count_replacements( $original_description, $new_description );
 			}
 
 			$state['last_id'] = $row->term_id;
@@ -1060,8 +1332,22 @@ class WPMH_Replace_Image_URLs {
 		}
 
 		foreach ( $rows as $row ) {
-			$new_description = $this->replace_urls_in_value( $row->description, $state );
-			if ( $new_description !== $row->description ) {
+			$original_description = $row->description;
+			$new_description = $this->replace_urls_in_value( $original_description, $state );
+			
+			if ( $new_description !== $original_description ) {
+				// Audit log
+				$audit_entry = array(
+					'table' => 'term_taxonomy',
+					'primary_key' => $row->term_taxonomy_id,
+					'column' => 'description',
+					'before' => $this->truncate_for_log( $original_description ),
+					'after' => $this->truncate_for_log( $new_description ),
+					'replacements' => $this->count_replacements( $original_description, $new_description ),
+				);
+				$this->add_audit_entry( $audit_entry );
+				$state['audit_log'][] = $audit_entry;
+
 				if ( ! $dry_run ) {
 					$wpdb->update(
 						$wpdb->term_taxonomy,
@@ -1072,7 +1358,7 @@ class WPMH_Replace_Image_URLs {
 					);
 				}
 				$rows_updated++;
-				$replacements += $this->count_replacements( $row->description, $new_description );
+				$replacements += $this->count_replacements( $original_description, $new_description );
 			}
 
 			$state['last_id'] = $row->term_taxonomy_id;
@@ -1165,6 +1451,7 @@ class WPMH_Replace_Image_URLs {
 
 	/**
 	 * Replace URLs in any value type (string, serialized, JSON)
+	 * Enhanced with builder JSON protection to prevent corruption
 	 *
 	 * @param mixed $value Value to process.
 	 * @param array $state Job state (for sample collection).
@@ -1181,15 +1468,20 @@ class WPMH_Replace_Image_URLs {
 			$unserialized = maybe_unserialize( $value );
 			if ( $unserialized !== $value && ( is_array( $unserialized ) || is_object( $unserialized ) ) ) {
 				// Value was serialized - process and re-serialize
+				// Root cause: Serialized PHP data must be unserialized, processed recursively, then re-serialized
+				// to avoid breaking serialized string length markers
 				$processed = $this->replace_urls_recursive( $unserialized, $state );
 				return maybe_serialize( $processed );
 			}
 
 			// Check if string is JSON data
+			// Root cause: Builder JSON (Bricks/Elementor) was being corrupted by direct string replacement
+			// URLs inside JSON were replaced, breaking JSON structure, escaping, or replacing IDs that must remain numeric
 			if ( $this->is_json( $value ) ) {
 				$decoded = json_decode( $value, true );
 				if ( json_last_error() === JSON_ERROR_NONE && ( is_array( $decoded ) || is_object( $decoded ) ) ) {
 					// Value was JSON - process and re-encode
+					// Only replace URLs in string fields, preserve numeric IDs
 					$processed = $this->replace_urls_recursive( $decoded, $state );
 					return wp_json_encode( $processed, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 				}
@@ -1444,6 +1736,261 @@ class WPMH_Replace_Image_URLs {
 		$webp_count = substr_count( strtolower( $new ), '.webp' );
 
 		return max( 0, $original_count - $new_count + $webp_count );
+	}
+
+	/**
+	 * Check if string replacement should be skipped
+	 * Protects builder JSON/config from corruption
+	 *
+	 * @param string $key Key name (option_name, meta_key, etc.).
+	 * @param string $value Value to check.
+	 * @param string $context Context (options, theme_mods, postmeta, etc.).
+	 * @return bool True if should skip replacement.
+	 */
+	private function should_skip_string_replacement( $key, $value, $context ) {
+		// Check filter hook for custom skip logic
+		if ( apply_filters( 'wpmh_replace_skip_key', false, $key, $value, $context ) ) {
+			return true;
+		}
+
+		// Skip known builder/config keys that contain JSON
+		$builder_keys = array(
+			'bricks_page_content',
+			'_elementor_data',
+			'_elementor_css',
+			'nav_menu_options',
+			'widget_',
+			'sidebars_widgets',
+		);
+
+		foreach ( $builder_keys as $builder_key ) {
+			if ( strpos( $key, $builder_key ) !== false ) {
+				// This is likely builder JSON - be very conservative
+				// Only process if it's clearly a simple URL string, not JSON
+				if ( $this->is_json( $value ) || strlen( $value ) > 1000 ) {
+					return true; // Skip large JSON/config strings
+				}
+			}
+		}
+
+		// Skip if it looks like JSON (large structured data)
+		if ( $this->is_json( $value ) && strlen( $value ) > 500 ) {
+			return true; // Skip large JSON structures
+		}
+
+		return false;
+	}
+
+	/**
+	 * Truncate value for audit log (prevent huge log entries)
+	 *
+	 * @param mixed $value Value to truncate.
+	 * @param int   $max_length Maximum length.
+	 * @return string|int Truncated value.
+	 */
+	private function truncate_for_log( $value, $max_length = 500 ) {
+		if ( is_numeric( $value ) ) {
+			return $value;
+		}
+		if ( ! is_string( $value ) ) {
+			return '[Non-string: ' . gettype( $value ) . ']';
+		}
+		if ( strlen( $value ) <= $max_length ) {
+			return $value;
+		}
+		return substr( $value, 0, $max_length ) . '... [truncated]';
+	}
+
+	/**
+	 * Handle rollback AJAX action
+	 */
+	public function handle_rollback() {
+		if ( ob_get_level() ) {
+			ob_clean();
+		}
+
+		try {
+			// Security checks
+			if ( ! current_user_can( 'manage_options' ) ) {
+				wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
+				return;
+			}
+
+			check_ajax_referer( 'wpmh_replace_image_urls', 'nonce' );
+
+			$upload_dir = wp_upload_dir();
+			$log_file = $upload_dir['basedir'] . '/webp-media-handler/replace-urls-last-run.json';
+
+			if ( ! file_exists( $log_file ) ) {
+				wp_send_json_error( array(
+					'message' => __( 'No log file found. Nothing to rollback.', 'webp-media-handler' ),
+				) );
+				return;
+			}
+
+			$log_data = json_decode( file_get_contents( $log_file ), true );
+			if ( ! $log_data || empty( $log_data['changes'] ) ) {
+				wp_send_json_error( array(
+					'message' => __( 'Log file is empty or invalid.', 'webp-media-handler' ),
+				) );
+				return;
+			}
+
+			// Only allow rollback if it was NOT a dry-run
+			if ( ! empty( $log_data['dry_run'] ) ) {
+				wp_send_json_error( array(
+					'message' => __( 'Cannot rollback a dry-run. No changes were made.', 'webp-media-handler' ),
+				) );
+				return;
+			}
+
+			$restored = 0;
+			$errors = 0;
+
+			foreach ( $log_data['changes'] as $entry ) {
+				try {
+					$restored += $this->rollback_entry( $entry );
+				} catch ( Exception $e ) {
+					$errors++;
+					error_log( '[WPMH Rollback] Error restoring entry: ' . $e->getMessage() );
+				}
+			}
+
+			wp_send_json_success( array(
+				'message' => sprintf(
+					/* translators: 1: Restored count, 2: Errors count */
+					__( 'Rollback complete. %1$d entries restored. %2$d errors.', 'webp-media-handler' ),
+					$restored,
+					$errors
+				),
+			) );
+
+		} catch ( Exception $e ) {
+			error_log( '[WPMH Replace URLs] Rollback error: ' . $e->getMessage() );
+			wp_send_json_error( array(
+				'message' => __( 'Rollback error: ', 'webp-media-handler' ) . $e->getMessage(),
+			) );
+		}
+	}
+
+	/**
+	 * Rollback a single audit log entry
+	 *
+	 * @param array $entry Audit log entry.
+	 * @return int 1 if restored, 0 if not.
+	 */
+	private function rollback_entry( $entry ) {
+		global $wpdb;
+
+		$table = $entry['table'];
+		$before_value = $entry['before'];
+
+		switch ( $table ) {
+			case 'posts':
+				$post_id = $entry['primary_key'];
+				$column = $entry['column'];
+				if ( strpos( $column, 'post_content' ) !== false ) {
+					wp_update_post( array(
+						'ID' => $post_id,
+						'post_content' => $before_value,
+					) );
+				}
+				if ( strpos( $column, 'post_excerpt' ) !== false ) {
+					wp_update_post( array(
+						'ID' => $post_id,
+						'post_excerpt' => $before_value,
+					) );
+				}
+				return 1;
+
+			case 'theme_mods':
+				$option_name = $entry['option_name'];
+				$mod_key = $entry['mod_key'];
+				$theme_name = str_replace( 'theme_mods_', '', $option_name );
+				$current_theme = get_option( 'stylesheet' );
+				
+				if ( $theme_name === $current_theme ) {
+					set_theme_mod( $mod_key, $before_value );
+				} else {
+					// For inactive themes, update option directly
+					$theme_mods = maybe_unserialize( get_option( $option_name, array() ) );
+					if ( is_array( $theme_mods ) ) {
+						$theme_mods[ $mod_key ] = $before_value;
+						update_option( $option_name, $theme_mods );
+					}
+				}
+				return 1;
+
+			case 'options':
+				$option_name = $entry['option_name'];
+				update_option( $option_name, $before_value );
+				return 1;
+
+			case 'postmeta':
+				$post_id = $entry['post_id'];
+				$meta_key = $entry['meta_key'];
+				update_post_meta( $post_id, $meta_key, $before_value );
+				return 1;
+
+			case 'usermeta':
+				$user_id = $entry['user_id'] ?? $entry['post_id'];
+				$meta_key = $entry['meta_key'];
+				update_user_meta( $user_id, $meta_key, $before_value );
+				return 1;
+
+			case 'termmeta':
+				$term_id = $entry['term_id'] ?? $entry['post_id'];
+				$meta_key = $entry['meta_key'];
+				update_term_meta( $term_id, $meta_key, $before_value );
+				return 1;
+
+			case 'terms':
+			case 'term_taxonomy':
+				$term_id = $entry['primary_key'];
+				$wpdb->update(
+					$wpdb->$table,
+					array( 'description' => $before_value ),
+					array( 'term_id' => $term_id ),
+					array( '%s' ),
+					array( '%d' )
+				);
+				return 1;
+		}
+
+		return 0;
+	}
+
+	/**
+	 * Handle view log AJAX action
+	 */
+	public function handle_view_log() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
+			return;
+		}
+
+		$upload_dir = wp_upload_dir();
+		$log_file = $upload_dir['basedir'] . '/webp-media-handler/replace-urls-last-run.json';
+
+		if ( ! file_exists( $log_file ) ) {
+			wp_send_json_error( array(
+				'message' => __( 'No log file found.', 'webp-media-handler' ),
+			) );
+			return;
+		}
+
+		$log_data = json_decode( file_get_contents( $log_file ), true );
+		if ( ! $log_data ) {
+			wp_send_json_error( array(
+				'message' => __( 'Log file is invalid.', 'webp-media-handler' ),
+			) );
+			return;
+		}
+
+		wp_send_json_success( array(
+			'log' => $log_data,
+			'summary' => isset( $log_data['summary'] ) ? $log_data['summary'] : array(),
+		) );
 	}
 
 	/**
