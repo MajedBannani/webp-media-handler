@@ -172,13 +172,14 @@
 			$status.removeClass('success error').addClass('show info').text(wpmhAdmin.strings.processing);
 
 			// Start processing
-			WPMHAdmin.processAction(action, nonceAction, 0);
+			var dryRun = (action === 'replace_urls') ? $('#wpmh-dry-run-replace-urls').is(':checked') : false;
+			WPMHAdmin.processAction(action, nonceAction, 0, null, dryRun);
 		},
 
 		/**
 		 * Process action (with batching)
 		 */
-		processAction: function(action, nonceAction, offset) {
+		processAction: function(action, nonceAction, offset, table, dryRun) {
 			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
 			var statusId = '#wpmh-status-' + action;
 			var $status = $(statusId);
@@ -199,6 +200,16 @@
 				nonce: nonce,
 				offset: offset
 			};
+
+			// Add dry-run and table for URL replacement
+			if (nonceAction === 'wpmh_replace_image_urls') {
+				if (dryRun !== undefined && dryRun !== null) {
+					postData.dry_run = dryRun ? '1' : '0';
+				}
+				if (table) {
+					postData.table = table;
+				}
+			}
 
 			// Add watermark-specific data
 			if (nonceAction === 'wpmh_apply_watermark') {
@@ -224,11 +235,34 @@
 						// If not completed, continue processing
 						if (!response.data.completed) {
 							setTimeout(function() {
-								WPMHAdmin.processAction(action, nonceAction, response.data.offset);
+								// Pass table and dry_run for URL replacement
+								var nextTable = response.data.table || table;
+								var nextDryRun = (dryRun !== undefined && dryRun !== null) ? dryRun : (response.data.dry_run !== undefined ? response.data.dry_run : false);
+								WPMHAdmin.processAction(action, nonceAction, response.data.offset, nextTable, nextDryRun);
 							}, 500);
 						} else {
 							// Re-enable button
 							$button.prop('disabled', false);
+							
+							// Show detailed stats if available (for URL replacement)
+							if (response.data.stats) {
+								var statsMsg = response.data.message;
+								if (response.data.stats.tables) {
+									var tableDetails = [];
+									for (var table in response.data.stats.tables) {
+										if (response.data.stats.tables.hasOwnProperty(table)) {
+											var t = response.data.stats.tables[table];
+											if (t.scanned > 0) {
+												tableDetails.push(table + ': ' + t.scanned + ' scanned, ' + t.updated + ' updated');
+											}
+										}
+									}
+									if (tableDetails.length > 0) {
+										statsMsg += '\n\n' + tableDetails.join('\n');
+									}
+								}
+								$status.html(statsMsg.replace(/\n/g, '<br>'));
+							}
 							
 							// SINGLE CONSUMPTION: Do NOT inject notice via JS
 							// The flash message is set server-side and will be rendered on next page load

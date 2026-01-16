@@ -2,12 +2,18 @@
 /**
  * Replace Existing Image URLs with WebP
  *
- * One-time action to replace JPG/JPEG/PNG URLs with WebP URLs throughout the WordPress database:
- * - wp_posts.post_content and post_excerpt
- * - wp_postmeta.meta_value (all post meta fields)
- * - wp_options.option_value (all options including theme mods)
- * - Handles serialized PHP data, JSON data, and Gutenberg block attributes
- * Only replaces if WebP file exists. Never replaces external URLs.
+ * Comprehensive database-wide URL replacement system that processes:
+ * - wp_posts (post_content, post_excerpt)
+ * - wp_postmeta (meta_value)
+ * - wp_options (option_value including theme_mods_*)
+ * - wp_termmeta (meta_value)
+ * - wp_usermeta (meta_value)
+ * - wp_terms (description)
+ * - wp_term_taxonomy (description)
+ *
+ * Handles serialized PHP data, JSON data, HTML/CSS (srcset, background-image), and Gutenberg blocks.
+ * Only replaces URLs if corresponding .webp file exists. Never replaces external URLs.
+ * Supports dry-run mode for safe testing.
  *
  * @package WebPMediaHandler
  */
@@ -28,6 +34,27 @@ class WPMH_Replace_Image_URLs {
 	 * @var WPMH_Settings_Manager
 	 */
 	private $settings;
+
+	/**
+	 * Batch size for processing
+	 *
+	 * @var int
+	 */
+	private $batch_size = 200;
+
+	/**
+	 * Dry run mode flag
+	 *
+	 * @var bool
+	 */
+	private $dry_run = false;
+
+	/**
+	 * Processing statistics
+	 *
+	 * @var array
+	 */
+	private $stats = array();
 
 	/**
 	 * Constructor
@@ -58,145 +85,181 @@ class WPMH_Replace_Image_URLs {
 
 		check_ajax_referer( 'wpmh_replace_image_urls', 'nonce' );
 
-		// Get batch parameters
-		// WordPress.org compliance: wp_unslash() before sanitization
+		// Get parameters
 		$offset = isset( $_POST['offset'] ) ? absint( wp_unslash( $_POST['offset'] ) ) : 0;
-		$batch_size = 50; // Process 50 posts at a time
+		$table = isset( $_POST['table'] ) ? sanitize_text_field( wp_unslash( $_POST['table'] ) ) : '';
+		$dry_run = isset( $_POST['dry_run'] ) && '1' === $_POST['dry_run'];
 
-		// Initialize replacement counter
-		if ( 0 === $offset ) {
-			$this->settings->log_action( 'replace_image_urls', array( 'replaced' => 0 ) );
+		$this->dry_run = $dry_run;
+
+		// Initialize statistics on first run
+		if ( 0 === $offset && empty( $table ) ) {
+			$this->stats = array(
+				'replaced' => 0,
+				'skipped_external' => 0,
+				'skipped_no_webp' => 0,
+				'tables' => array(),
+			);
+			$this->settings->log_action( 'replace_image_urls', array( 'stats' => $this->stats ) );
+		} else {
+			$log = $this->settings->get_action_log( 'replace_image_urls' );
+			$this->stats = isset( $log['data']['stats'] ) ? $log['data']['stats'] : $this->stats;
 		}
 
-		// Process posts (content and excerpt)
-		$posts_result = $this->replace_urls_in_posts( $offset, $batch_size );
+		// Process tables in sequence
+		$tables = array( 'posts', 'postmeta', 'options', 'termmeta', 'usermeta', 'terms', 'term_taxonomy' );
 
-		if ( $posts_result['completed'] ) {
-			// Process postmeta
-			$this->replace_urls_in_postmeta();
+		if ( empty( $table ) ) {
+			$table = $tables[0];
+		}
 
-			// Process theme_mods
-			$this->replace_urls_in_theme_mods();
+		$table_index = array_search( $table, $tables, true );
+		if ( false === $table_index ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid table.', 'webp-media-handler' ) ) );
+		}
 
-			// Process wp_options
-			$this->replace_urls_in_options();
+		// Process current table
+		$result = $this->process_table( $table, $offset );
 
-			// Get final summary
-			$log = $this->settings->get_action_log( 'replace_image_urls' );
-			$total_replaced = isset( $log['data']['replaced'] ) ? $log['data']['replaced'] : 0;
-
-			wp_send_json_success( array(
-				'message' => sprintf(
-					/* translators: %d: Number of replaced URLs */
-					__( 'URL replacement complete! Replaced %d image URLs with WebP versions.', 'webp-media-handler' ),
-					$total_replaced
-				),
-				'completed' => true,
-			) );
+		if ( $result['completed'] ) {
+			// Move to next table
+			$table_index++;
+			if ( $table_index < count( $tables ) ) {
+				$next_table = $tables[ $table_index ];
+				wp_send_json_success( array(
+					'message' => sprintf(
+						/* translators: 1: Current table, 2: Next table */
+						__( 'Completed %1$s. Processing %2$s...', 'webp-media-handler' ),
+						$table,
+						$next_table
+					),
+					'offset' => 0,
+					'table' => $next_table,
+					'completed' => false,
+				) );
+			} else {
+				// All tables completed
+				$this->finalize_stats();
+				wp_send_json_success( array(
+					'message' => $this->build_completion_message(),
+					'completed' => true,
+					'stats' => $this->stats,
+				) );
+			}
 		} else {
 			wp_send_json_success( array(
 				'message' => sprintf(
-					/* translators: 1: Processed count, 2: Total count */
-					__( 'Processing posts... %1$d of %2$d posts processed.', 'webp-media-handler' ),
-					$posts_result['processed'],
-					$posts_result['total']
+					/* translators: 1: Table name, 2: Processed count, 3: Total count */
+					__( 'Processing %1$s... %2$d of %3$d rows processed.', 'webp-media-handler' ),
+					$table,
+					$result['processed'],
+					$result['total']
 				),
-				'offset' => $posts_result['processed'],
+				'offset' => $result['processed'],
+				'table' => $table,
 				'completed' => false,
 			) );
 		}
 	}
 
 	/**
-	 * Replace URLs in post content and excerpt
+	 * Process a specific table
 	 *
-	 * @param int $offset Offset for pagination.
-	 * @param int $limit Number of posts to process.
+	 * @param string $table_name Table name to process.
+	 * @param int    $offset Offset for pagination.
 	 * @return array Result array with completion status.
 	 */
-	private function replace_urls_in_posts( $offset = 0, $limit = 50 ) {
+	private function process_table( $table_name, $offset = 0 ) {
 		global $wpdb;
 
-		$args = array(
-			'post_type'      => 'any',
-			'post_status'    => 'any',
-			'posts_per_page' => $limit,
-			'offset'         => $offset,
-			'fields'         => 'ids',
+		$method_name = 'process_' . $table_name;
+		if ( method_exists( $this, $method_name ) ) {
+			return call_user_func( array( $this, $method_name ), $offset );
+		}
+
+		return array( 'completed' => true, 'processed' => 0, 'total' => 0 );
+	}
+
+	/**
+	 * Process wp_posts table
+	 *
+	 * @param int $offset Offset for pagination.
+	 * @return array Result array.
+	 */
+	private function process_posts( $offset = 0 ) {
+		global $wpdb;
+
+		$total = $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts}" );
+		
+		$posts = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT ID, post_content, post_excerpt FROM {$wpdb->posts} 
+				WHERE (post_content LIKE %s OR post_content LIKE %s OR post_content LIKE %s
+				       OR post_excerpt LIKE %s OR post_excerpt LIKE %s OR post_excerpt LIKE %s)
+				LIMIT %d OFFSET %d",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				$this->batch_size,
+				$offset
+			)
 		);
 
-		$query = new WP_Query( $args );
-		$posts = $query->posts;
-		$total = $query->found_posts;
+		$rows_updated = 0;
+		$rows_scanned = count( $posts );
 
-		$replaced_count = 0;
-
-		foreach ( $posts as $post_id ) {
-			$post = get_post( $post_id );
-			if ( ! $post ) {
-				continue;
-			}
-
-			$update_data = array( 'ID' => $post_id );
+		foreach ( $posts as $post ) {
+			$update_data = array();
 			$has_changes = false;
 
 			// Process post_content
-			$original_content = $post->post_content;
-			$new_content = $this->replace_urls_in_value( $original_content );
-			if ( $original_content !== $new_content ) {
+			$new_content = $this->replace_urls_in_value( $post->post_content );
+			if ( $new_content !== $post->post_content ) {
 				$update_data['post_content'] = $new_content;
 				$has_changes = true;
-				$replaced_count += $this->count_replacements( $original_content, $new_content );
 			}
 
 			// Process post_excerpt
-			$original_excerpt = $post->post_excerpt;
-			$new_excerpt = $this->replace_urls_in_value( $original_excerpt );
-			if ( $original_excerpt !== $new_excerpt ) {
+			$new_excerpt = $this->replace_urls_in_value( $post->post_excerpt );
+			if ( $new_excerpt !== $post->post_excerpt ) {
 				$update_data['post_excerpt'] = $new_excerpt;
 				$has_changes = true;
-				$replaced_count += $this->count_replacements( $original_excerpt, $new_excerpt );
 			}
 
 			if ( $has_changes ) {
-				// WordPress.org compliance: wp_update_post sanitizes fields automatically
-				wp_update_post( $update_data );
+				if ( ! $this->dry_run ) {
+					wp_update_post( array_merge( array( 'ID' => $post->ID ), $update_data ) );
+				}
+				$rows_updated++;
 			}
 		}
 
-		// Update log
-		$current_log = $this->settings->get_action_log( 'replace_image_urls' );
-		$current_replaced = isset( $current_log['data']['replaced'] ) ? (int) $current_log['data']['replaced'] : 0;
-		$this->settings->log_action( 'replace_image_urls', array(
-			'replaced' => $current_replaced + $replaced_count,
-		) );
+		$this->update_table_stats( 'posts', $rows_scanned, $rows_updated );
 
 		$processed = $offset + count( $posts );
-
 		return array(
 			'completed' => $processed >= $total,
 			'processed' => $processed,
-			'total'     => $total,
+			'total' => $total,
 		);
 	}
 
 	/**
-	 * Replace URLs in postmeta
+	 * Process wp_postmeta table
 	 *
-	 * WordPress.org compliance: Direct database query required because:
-	 * - WordPress core APIs require knowing meta keys in advance
-	 * - We need to search for meta values containing image URLs without knowing their keys
-	 * - Query uses prepared statements and properly escaped
+	 * @param int $offset Offset for pagination.
+	 * @return array Result array.
 	 */
-	private function replace_urls_in_postmeta() {
+	private function process_postmeta( $offset = 0 ) {
 		global $wpdb;
 
-		// Search for postmeta containing image extensions (case-insensitive)
-		$postmeta = $wpdb->get_results(
+		$total = $wpdb->get_var(
 			$wpdb->prepare(
-				"SELECT meta_id, post_id, meta_key, meta_value 
-				FROM {$wpdb->postmeta} 
-				WHERE (meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s 
+				"SELECT COUNT(*) FROM {$wpdb->postmeta}
+				WHERE (meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s
 				       OR meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s)",
 				'%' . $wpdb->esc_like( '.jpg' ) . '%',
 				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
@@ -207,109 +270,39 @@ class WPMH_Replace_Image_URLs {
 			)
 		);
 
-		$replaced_count = 0;
-
-		foreach ( $postmeta as $meta ) {
-			$original_value = $meta->meta_value;
-			$new_value = $this->replace_urls_in_value( $original_value );
-
-			if ( $original_value !== $new_value ) {
-				// Update meta value
-				update_post_meta( $meta->post_id, $meta->meta_key, $new_value );
-				$replaced_count += $this->count_replacements( $original_value, $new_value );
-			}
-		}
-
-		// Update log
-		$current_log = $this->settings->get_action_log( 'replace_image_urls' );
-		$current_replaced = isset( $current_log['data']['replaced'] ) ? (int) $current_log['data']['replaced'] : 0;
-		$this->settings->log_action( 'replace_image_urls', array(
-			'replaced' => $current_replaced + $replaced_count,
-		) );
-	}
-
-	/**
-	 * Replace URLs in theme mods
-	 * 
-	 * WordPress.org compliance: Direct database query required because:
-	 * - WordPress core APIs (get_theme_mod, get_option) don't provide bulk access to all theme mods
-	 * - We need to process all theme_mods_* options across all themes, not just the active theme
-	 * - Query is read-only, uses prepared statements, and properly escaped
-	 * - Caching is intentionally NOT used: this is a one-time, user-triggered maintenance action and must
-	 *   reflect the current database state at execution time (Plugin Check reviewer note).
-	 */
-	private function replace_urls_in_theme_mods() {
-		global $wpdb;
-
-		// Plugin Check: Direct database query justification
-		// - This is a one-time, user-triggered maintenance action (not automatic or front-end exposed)
-		// - Operation scans and updates theme_mods_* options across all themes, not just active theme
-		// - WordPress core APIs (get_theme_mod, get_option) don't provide bulk access to all theme mods
-		// - get_alloptions() doesn't include all options and isn't suitable for this cross-theme use case
-		// - Query is read-only, uses prepared statements ($wpdb->prepare), and properly escaped
-		// - Safety: Executed only after current_user_can('manage_options') and nonce verification in handle_replace_action()
-		// - No caching: Object caching is intentionally NOT used because:
-		//   * This is a destructive operation that must reflect current database state at execution time
-		//   * Caching would risk stale results during URL replacement, potentially missing or corrupting data
-		//   * Operation is not performance-critical (manual, infrequent, user-triggered maintenance action)
-		$theme_mods = $wpdb->get_results(
+		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s",
-				$wpdb->esc_like( 'theme_mods_' ) . '%'
+				"SELECT meta_id, post_id, meta_key, meta_value FROM {$wpdb->postmeta}
+				WHERE (meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s
+				       OR meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s)
+				LIMIT %d OFFSET %d",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%',
+				$this->batch_size,
+				$offset
 			)
 		);
 
-		$replaced_count = 0;
-
-		foreach ( $theme_mods as $mod ) {
-			$original_value = $mod->option_value;
-			$new_value = $this->replace_urls_in_value( $original_value );
-
-			if ( $original_value !== $new_value ) {
-				update_option( $mod->option_name, $new_value );
-				$replaced_count += $this->count_replacements( $original_value, $new_value );
-			}
-		}
-
-		// Update log
-		$current_log = $this->settings->get_action_log( 'replace_image_urls' );
-		$current_replaced = isset( $current_log['data']['replaced'] ) ? $current_log['data']['replaced'] : 0;
-		$this->settings->log_action( 'replace_image_urls', array(
-			'replaced' => $current_replaced + $replaced_count,
-		) );
+		return $this->process_meta_table( $rows, 'postmeta', $total, $offset );
 	}
 
 	/**
-	 * Replace URLs in wp_options
-	 * 
-	 * WordPress.org compliance: Direct database query required because:
-	 * - WordPress core APIs (get_option) require knowing option names in advance
-	 * - We need to search for options containing image URLs without knowing their names
-	 * - get_alloptions() doesn't include all options and isn't suitable for this use case
-	 * - Query is read-only, uses prepared statements, and properly escaped
-	 * - Caching is intentionally NOT used: this is a one-time, user-triggered maintenance action and must
-	 *   reflect the current database state at execution time (Plugin Check reviewer note).
+	 * Process wp_options table
+	 *
+	 * @param int $offset Offset for pagination.
+	 * @return array Result array.
 	 */
-	private function replace_urls_in_options() {
+	private function process_options( $offset = 0 ) {
 		global $wpdb;
 
-		// Plugin Check: Direct database query justification
-		// - This is a one-time, user-triggered maintenance action (not automatic or front-end exposed)
-		// - Operation scans and updates wp_options for image URLs in post_content and serialized data
-		// - WordPress core APIs (get_option) require knowing option names in advance
-		// - We need to search for options containing image URLs without knowing their names
-		// - get_alloptions() doesn't include all options and isn't suitable for this search use case
-		// - Query is read-only, uses prepared statements ($wpdb->prepare), and properly escaped
-		// - Safety: Executed only after current_user_can('manage_options') and nonce verification in handle_replace_action()
-		// - No caching: Object caching is intentionally NOT used because:
-		//   * This is a destructive operation that must reflect current database state at execution time
-		//   * Caching would risk stale results during URL replacement, potentially missing or corrupting data
-		//   * Operation is not performance-critical (manual, infrequent, user-triggered maintenance action)
-		// Search for options containing image extensions (case-insensitive)
-		$options = $wpdb->get_results(
+		$total = $wpdb->get_var(
 			$wpdb->prepare(
-				"SELECT option_name, option_value FROM {$wpdb->options} 
-				WHERE (option_value LIKE %s OR option_value LIKE %s OR option_value LIKE %s 
+				"SELECT COUNT(*) FROM {$wpdb->options}
+				WHERE (option_value LIKE %s OR option_value LIKE %s OR option_value LIKE %s
 				       OR option_value LIKE %s OR option_value LIKE %s OR option_value LIKE %s)",
 				'%' . $wpdb->esc_like( '.jpg' ) . '%',
 				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
@@ -320,30 +313,391 @@ class WPMH_Replace_Image_URLs {
 			)
 		);
 
-		$replaced_count = 0;
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT option_id as meta_id, option_name as meta_key, option_value as meta_value FROM {$wpdb->options}
+				WHERE option_name NOT IN ('active_plugins', 'cron', 'rewrite_rules')
+				  AND (option_value LIKE %s OR option_value LIKE %s OR option_value LIKE %s
+				       OR option_value LIKE %s OR option_value LIKE %s OR option_value LIKE %s)
+				LIMIT %d OFFSET %d",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%',
+				$this->batch_size,
+				$offset
+			)
+		);
 
-		foreach ( $options as $option ) {
-			// Skip certain options that shouldn't be modified
-			$skip_options = array( 'active_plugins', 'cron', 'rewrite_rules' );
-			if ( in_array( $option->option_name, $skip_options, true ) ) {
-				continue;
-			}
+		$rows_updated = 0;
+		$rows_scanned = count( $rows );
 
-			$original_value = $option->option_value;
-			$new_value = $this->replace_urls_in_value( $original_value );
-
-			if ( $original_value !== $new_value ) {
-				update_option( $option->option_name, $new_value );
-				$replaced_count += $this->count_replacements( $original_value, $new_value );
+		foreach ( $rows as $row ) {
+			$new_value = $this->replace_urls_in_value( $row->meta_value );
+			if ( $new_value !== $row->meta_value ) {
+				if ( ! $this->dry_run ) {
+					update_option( $row->meta_key, $new_value );
+				}
+				$rows_updated++;
 			}
 		}
 
-		// Update log
-		$current_log = $this->settings->get_action_log( 'replace_image_urls' );
-		$current_replaced = isset( $current_log['data']['replaced'] ) ? $current_log['data']['replaced'] : 0;
-		$this->settings->log_action( 'replace_image_urls', array(
-			'replaced' => $current_replaced + $replaced_count,
-		) );
+		$this->update_table_stats( 'options', $rows_scanned, $rows_updated );
+
+		$processed = $offset + count( $rows );
+		return array(
+			'completed' => $processed >= $total,
+			'processed' => $processed,
+			'total' => $total,
+		);
+	}
+
+	/**
+	 * Process wp_termmeta table
+	 *
+	 * @param int $offset Offset for pagination.
+	 * @return array Result array.
+	 */
+	private function process_termmeta( $offset = 0 ) {
+		global $wpdb;
+
+		if ( ! $wpdb->get_var( "SHOW TABLES LIKE '{$wpdb->termmeta}'" ) ) {
+			return array( 'completed' => true, 'processed' => 0, 'total' => 0 );
+		}
+
+		$total = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->termmeta}
+				WHERE (meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s
+				       OR meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s)",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%'
+			)
+		);
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT meta_id, term_id as post_id, meta_key, meta_value FROM {$wpdb->termmeta}
+				WHERE (meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s
+				       OR meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s)
+				LIMIT %d OFFSET %d",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%',
+				$this->batch_size,
+				$offset
+			)
+		);
+
+		return $this->process_meta_table( $rows, 'termmeta', $total, $offset );
+	}
+
+	/**
+	 * Process wp_usermeta table
+	 *
+	 * @param int $offset Offset for pagination.
+	 * @return array Result array.
+	 */
+	private function process_usermeta( $offset = 0 ) {
+		global $wpdb;
+
+		$total = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->usermeta}
+				WHERE (meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s
+				       OR meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s)",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%'
+			)
+		);
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT umeta_id as meta_id, user_id as post_id, meta_key, meta_value FROM {$wpdb->usermeta}
+				WHERE (meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s
+				       OR meta_value LIKE %s OR meta_value LIKE %s OR meta_value LIKE %s)
+				LIMIT %d OFFSET %d",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%',
+				$this->batch_size,
+				$offset
+			)
+		);
+
+		return $this->process_meta_table( $rows, 'usermeta', $total, $offset );
+	}
+
+	/**
+	 * Process wp_terms table (description field)
+	 *
+	 * @param int $offset Offset for pagination.
+	 * @return array Result array.
+	 */
+	private function process_terms( $offset = 0 ) {
+		global $wpdb;
+
+		$total = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->terms}
+				WHERE (description LIKE %s OR description LIKE %s OR description LIKE %s
+				       OR description LIKE %s OR description LIKE %s OR description LIKE %s)",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%'
+			)
+		);
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT term_id, description FROM {$wpdb->terms}
+				WHERE (description LIKE %s OR description LIKE %s OR description LIKE %s
+				       OR description LIKE %s OR description LIKE %s OR description LIKE %s)
+				LIMIT %d OFFSET %d",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%',
+				$this->batch_size,
+				$offset
+			)
+		);
+
+		$rows_updated = 0;
+		$rows_scanned = count( $rows );
+
+		foreach ( $rows as $row ) {
+			$new_description = $this->replace_urls_in_value( $row->description );
+			if ( $new_description !== $row->description ) {
+				if ( ! $this->dry_run ) {
+					$wpdb->update(
+						$wpdb->terms,
+						array( 'description' => $new_description ),
+						array( 'term_id' => $row->term_id ),
+						array( '%s' ),
+						array( '%d' )
+					);
+				}
+				$rows_updated++;
+			}
+		}
+
+		$this->update_table_stats( 'terms', $rows_scanned, $rows_updated );
+
+		$processed = $offset + count( $rows );
+		return array(
+			'completed' => $processed >= $total,
+			'processed' => $processed,
+			'total' => $total,
+		);
+	}
+
+	/**
+	 * Process wp_term_taxonomy table (description field)
+	 *
+	 * @param int $offset Offset for pagination.
+	 * @return array Result array.
+	 */
+	private function process_term_taxonomy( $offset = 0 ) {
+		global $wpdb;
+
+		$total = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->term_taxonomy}
+				WHERE (description LIKE %s OR description LIKE %s OR description LIKE %s
+				       OR description LIKE %s OR description LIKE %s OR description LIKE %s)",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%'
+			)
+		);
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT term_taxonomy_id, description FROM {$wpdb->term_taxonomy}
+				WHERE (description LIKE %s OR description LIKE %s OR description LIKE %s
+				       OR description LIKE %s OR description LIKE %s OR description LIKE %s)
+				LIMIT %d OFFSET %d",
+				'%' . $wpdb->esc_like( '.jpg' ) . '%',
+				'%' . $wpdb->esc_like( '.jpeg' ) . '%',
+				'%' . $wpdb->esc_like( '.png' ) . '%',
+				'%' . $wpdb->esc_like( '.JPG' ) . '%',
+				'%' . $wpdb->esc_like( '.JPEG' ) . '%',
+				'%' . $wpdb->esc_like( '.PNG' ) . '%',
+				$this->batch_size,
+				$offset
+			)
+		);
+
+		$rows_updated = 0;
+		$rows_scanned = count( $rows );
+
+		foreach ( $rows as $row ) {
+			$new_description = $this->replace_urls_in_value( $row->description );
+			if ( $new_description !== $row->description ) {
+				if ( ! $this->dry_run ) {
+					$wpdb->update(
+						$wpdb->term_taxonomy,
+						array( 'description' => $new_description ),
+						array( 'term_taxonomy_id' => $row->term_taxonomy_id ),
+						array( '%s' ),
+						array( '%d' )
+					);
+				}
+				$rows_updated++;
+			}
+		}
+
+		$this->update_table_stats( 'term_taxonomy', $rows_scanned, $rows_updated );
+
+		$processed = $offset + count( $rows );
+		return array(
+			'completed' => $processed >= $total,
+			'processed' => $processed,
+			'total' => $total,
+		);
+	}
+
+	/**
+	 * Process meta table rows (postmeta, termmeta, usermeta)
+	 *
+	 * @param array  $rows Rows to process.
+	 * @param string $table_name Table name for stats.
+	 * @param int    $total Total rows in table.
+	 * @param int    $offset Current offset.
+	 * @return array Result array.
+	 */
+	private function process_meta_table( $rows, $table_name, $total, $offset ) {
+		global $wpdb;
+
+		$rows_updated = 0;
+		$rows_scanned = count( $rows );
+
+		foreach ( $rows as $row ) {
+			$new_value = $this->replace_urls_in_value( $row->meta_value );
+			if ( $new_value !== $row->meta_value ) {
+				if ( ! $this->dry_run ) {
+					switch ( $table_name ) {
+						case 'postmeta':
+							update_post_meta( $row->post_id, $row->meta_key, $new_value );
+							break;
+						case 'termmeta':
+							update_term_meta( $row->post_id, $row->meta_key, $new_value );
+							break;
+						case 'usermeta':
+							update_user_meta( $row->post_id, $row->meta_key, $new_value );
+							break;
+					}
+				}
+				$rows_updated++;
+			}
+		}
+
+		$this->update_table_stats( $table_name, $rows_scanned, $rows_updated );
+
+		$processed = $offset + count( $rows );
+		return array(
+			'completed' => $processed >= $total,
+			'processed' => $processed,
+			'total' => $total,
+		);
+	}
+
+	/**
+	 * Update table statistics
+	 *
+	 * @param string $table_name Table name.
+	 * @param int    $scanned Rows scanned.
+	 * @param int    $updated Rows updated.
+	 */
+	private function update_table_stats( $table_name, $scanned, $updated ) {
+		if ( ! isset( $this->stats['tables'][ $table_name ] ) ) {
+			$this->stats['tables'][ $table_name ] = array(
+				'scanned' => 0,
+				'updated' => 0,
+			);
+		}
+		$this->stats['tables'][ $table_name ]['scanned'] += $scanned;
+		$this->stats['tables'][ $table_name ]['updated'] += $updated;
+
+		// Save stats
+		$this->settings->log_action( 'replace_image_urls', array( 'stats' => $this->stats ) );
+	}
+
+	/**
+	 * Finalize statistics
+	 */
+	private function finalize_stats() {
+		// Calculate totals
+		$total_replaced = 0;
+		foreach ( $this->stats['tables'] as $table_stats ) {
+			$total_replaced += $table_stats['updated'];
+		}
+		$this->stats['replaced'] = $total_replaced;
+
+		$this->settings->log_action( 'replace_image_urls', array( 'stats' => $this->stats ) );
+	}
+
+	/**
+	 * Build completion message with statistics
+	 *
+	 * @return string Completion message.
+	 */
+	private function build_completion_message() {
+		$mode = $this->dry_run ? __( 'Dry run completed', 'webp-media-handler' ) : __( 'URL replacement complete', 'webp-media-handler' );
+		
+		$message = $mode . '! ';
+		
+		// Table breakdown
+		$table_messages = array();
+		foreach ( $this->stats['tables'] as $table => $stats ) {
+			if ( $stats['scanned'] > 0 ) {
+				$table_messages[] = sprintf(
+					/* translators: 1: Table name, 2: Scanned count, 3: Updated count */
+					__( '%1$s: %2$d scanned, %3$d updated', 'webp-media-handler' ),
+					$table,
+					$stats['scanned'],
+					$stats['updated']
+				);
+			}
+		}
+
+		if ( ! empty( $table_messages ) ) {
+			$message .= implode( '; ', $table_messages ) . '. ';
+		}
+
+		// Total replacements
+		$message .= sprintf(
+			/* translators: %d: Total replacements */
+			__( 'Total replacements: %d.', 'webp-media-handler' ),
+			$this->stats['replaced']
+		);
+
+		return $message;
 	}
 
 	/**
@@ -378,7 +732,7 @@ class WPMH_Replace_Image_URLs {
 				}
 			}
 
-			// Plain string - process directly
+			// Plain string - process directly (handles srcset, HTML, CSS, etc.)
 			return $this->replace_urls_in_string( $value );
 		}
 
@@ -432,7 +786,7 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Replace URLs in a string
+	 * Replace URLs in a string (handles srcset, HTML attributes, CSS, etc.)
 	 *
 	 * @param string $content Content to process.
 	 * @return string Processed content.
@@ -442,18 +796,35 @@ class WPMH_Replace_Image_URLs {
 			return $content;
 		}
 
-		// IMPROVED: Case-insensitive regex matching .jpg, .jpeg, .png with query strings
+		// Handle srcset attribute (special case: multiple URLs with descriptors)
+		if ( preg_match( '/srcset\s*=\s*["\']([^"\']+)["\']/i', $content ) ) {
+			$content = preg_replace_callback(
+				'/srcset\s*=\s*["\']([^"\']+)["\']/i',
+				array( $this, 'replace_srcset_callback' ),
+				$content
+			);
+		}
+
+		// Handle CSS background-image: url(...)
+		$content = preg_replace_callback(
+			'/background-image\s*:\s*url\s*\(\s*["\']?([^"\'()]+)["\']?\s*\)/i',
+			array( $this, 'replace_css_url_callback' ),
+			$content
+		);
+
+		// IMPROVED: Case-insensitive regex matching .jpg, .jpeg, .png with query strings and hashes
 		// Pattern matches:
 		// - Absolute URLs: http:// or https://
 		// - Relative URLs: /path/to/image
 		// - Extensions: .jpg, .jpeg, .png (case-insensitive: JPG, JPEG, PNG, etc.)
-		// - Query strings: ?param=value&other=val
+		// - Query strings: ?param=value
+		// - URL fragments: #hash
 		// - Works in HTML attributes, JSON, Gutenberg blocks, etc.
 		$patterns = array(
 			// Absolute URLs with protocol (https:// or http://)
-			'/(https?:\/\/[^\s"\'<>\[\]{}()]+?)\.(jpg|jpeg|png)(\?[^\s"\'<>\[\]{}()]*)?/i',
+			'/(https?:\/\/[^\s"\'<>\[\]{}()]+?)\.(jpg|jpeg|png)(\?[^\s"\'<>\[\]{}()]*)?(#[^\s"\'<>\[\]{}()]*)?/i',
 			// Relative URLs starting with / (site-relative paths)
-			'/(\/[^\s"\'<>\[\]{}()]+?)\.(jpg|jpeg|png)(\?[^\s"\'<>\[\]{}()]*)?/i',
+			'/(\/[^\s"\'<>\[\]{}()]+?)\.(jpg|jpeg|png)(\?[^\s"\'<>\[\]{}()]*)?(#[^\s"\'<>\[\]{}()]*)?/i',
 		);
 
 		foreach ( $patterns as $pattern ) {
@@ -464,35 +835,64 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Count URL replacements between original and new content
+	 * Callback for srcset replacement
 	 *
-	 * @param string $original Original content.
-	 * @param string $new New content.
-	 * @return int Number of replacements.
+	 * @param array $matches Matched srcset content.
+	 * @return string Replacement srcset.
 	 */
-	private function count_replacements( $original, $new ) {
-		if ( ! is_string( $original ) || ! is_string( $new ) ) {
-			return 0;
+	private function replace_srcset_callback( $matches ) {
+		$full_srcset = $matches[0];
+		$srcset_content = $matches[1];
+
+		// Split srcset by commas, process each URL token
+		$tokens = explode( ',', $srcset_content );
+		$processed_tokens = array();
+
+		foreach ( $tokens as $token ) {
+			$token = trim( $token );
+			// Extract URL (before space/descriptor) and descriptor
+			if ( preg_match( '/^(.+?\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?)\s*(.+)$/i', $token, $token_matches ) ) {
+				$url_part = $token_matches[1];
+				$descriptor = isset( $token_matches[5] ) ? ' ' . trim( $token_matches[5] ) : '';
+				
+				// Replace URL part
+				$replaced_url = preg_replace_callback(
+					'/(.+?)\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?$/i',
+					array( $this, 'replace_url_callback' ),
+					$url_part
+				);
+				$processed_tokens[] = $replaced_url . $descriptor;
+			} else {
+				// No descriptor, just URL
+				$processed_tokens[] = preg_replace_callback(
+					'/(.+?)\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?$/i',
+					array( $this, 'replace_url_callback' ),
+					$token
+				);
+			}
 		}
 
-		// Count image extensions in original (case-insensitive)
-		$original_count = 0;
-		$extensions = array( '.jpg', '.jpeg', '.png' );
-		foreach ( $extensions as $ext ) {
-			$original_count += substr_count( strtolower( $original ), strtolower( $ext ) );
-		}
+		return 'srcset="' . implode( ', ', $processed_tokens ) . '"';
+	}
 
-		// Count image extensions in new (case-insensitive)
-		$new_count = 0;
-		foreach ( $extensions as $ext ) {
-			$new_count += substr_count( strtolower( $new ), strtolower( $ext ) );
-		}
+	/**
+	 * Callback for CSS URL replacement
+	 *
+	 * @param array $matches Matched CSS URL.
+	 * @return string Replacement CSS.
+	 */
+	private function replace_css_url_callback( $matches ) {
+		$full_match = $matches[0];
+		$url = $matches[1];
 
-		// Count .webp in new (replaced URLs)
-		$webp_count = substr_count( strtolower( $new ), '.webp' );
+		// Replace URL in CSS url()
+		$replaced_url = preg_replace_callback(
+			'/(.+?)\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?$/i',
+			array( $this, 'replace_url_callback' ),
+			$url
+		);
 
-		// Approximate replacement count
-		return max( 0, $original_count - $new_count + $webp_count );
+		return str_replace( $url, $replaced_url, $full_match );
 	}
 
 	/**
@@ -506,26 +906,38 @@ class WPMH_Replace_Image_URLs {
 		$base_url = $matches[1];
 		$extension = strtolower( $matches[2] ); // Normalize to lowercase
 		$query = isset( $matches[3] ) ? $matches[3] : '';
+		$fragment = isset( $matches[4] ) ? $matches[4] : '';
 
 		// Reconstruct the full original URL
-		$original_url = $base_url . '.' . $extension . $query;
+		$original_url = $base_url . '.' . $extension . $query . $fragment;
 
-		// Skip external URLs (not from this site)
+		// Skip if already .webp
+		if ( preg_match( '/\.webp($|[?#])/i', $original_url ) ) {
+			return $full_url;
+		}
+
+		// Get allowed URL bases (upload dir, home URL, site URL)
 		$upload_dir = wp_upload_dir();
 		$home_url = home_url();
-		
+		$site_url = site_url();
+
+		// Optional: Check for CDN base URL from settings (future extension)
+		$cdn_base_url = apply_filters( 'wpmh_cdn_base_url', '' );
+
 		// Check if URL is from this site (case-insensitive comparison)
 		$upload_baseurl_lower = strtolower( $upload_dir['baseurl'] );
 		$home_url_lower = strtolower( $home_url );
+		$site_url_lower = strtolower( $site_url );
 		$original_url_lower = strtolower( $original_url );
 		
 		$is_upload_url = strpos( $original_url_lower, $upload_baseurl_lower ) !== false;
 		$is_home_url = strpos( $original_url_lower, $home_url_lower ) !== false;
-		
-		// Also check for relative URLs (starting with /)
+		$is_site_url = strpos( $original_url_lower, $site_url_lower ) !== false;
+		$is_cdn_url = ! empty( $cdn_base_url ) && strpos( $original_url_lower, strtolower( $cdn_base_url ) ) !== false;
 		$is_relative_url = ( '/' === substr( $original_url, 0, 1 ) );
 		
-		if ( ! $is_upload_url && ! $is_home_url && ! $is_relative_url ) {
+		if ( ! $is_upload_url && ! $is_home_url && ! $is_site_url && ! $is_cdn_url && ! $is_relative_url ) {
+			$this->stats['skipped_external']++;
 			return $full_url; // External URL, skip
 		}
 
@@ -534,52 +946,65 @@ class WPMH_Replace_Image_URLs {
 		if ( $is_upload_url ) {
 			// URL is in uploads directory
 			$file_path = str_replace( $upload_dir['baseurl'], $upload_dir['basedir'], $original_url );
-		} elseif ( $is_home_url ) {
+		} elseif ( $is_cdn_url ) {
+			// CDN URL - map to local uploads directory
+			$file_path = str_replace( $cdn_base_url, $upload_dir['basedir'], $original_url );
+		} elseif ( $is_home_url || $is_site_url ) {
 			// URL is relative to site root
-			$relative_path = str_replace( $home_url, '', $original_url );
+			$relative_path = str_replace( array( $home_url, $site_url ), '', $original_url );
 			$file_path = ABSPATH . ltrim( $relative_path, '/' );
 		} elseif ( $is_relative_url ) {
 			// Relative URL starting with /
 			$file_path = ABSPATH . ltrim( $original_url, '/' );
 		}
 
-		// Remove query string from file path
-		$file_path = strtok( $file_path, '?' );
+		// Remove query string and fragment from file path
+		$path_parts = explode( '?', $file_path, 2 );
+		$file_path = $path_parts[0];
+		$path_parts = explode( '#', $file_path, 2 );
+		$file_path = $path_parts[0];
 
 		// Normalize path separators
 		$file_path = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $file_path );
 
 		// Check if original file exists (safety check)
-		if ( ! file_exists( $file_path ) ) {
+		// Allow skipping file existence check if CDN mode is enabled (optional setting)
+		$require_local_file = apply_filters( 'wpmh_require_local_file', true );
+		if ( $require_local_file && ! file_exists( $file_path ) ) {
+			$this->stats['skipped_no_webp']++;
 			return $full_url;
 		}
 
 		// Check if WebP version exists (case-insensitive extension replacement)
 		$webp_path = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $file_path );
 
-		if ( file_exists( $webp_path ) ) {
-			// Convert back to URL (preserve original URL structure)
-			if ( $is_upload_url ) {
-				$webp_url = str_replace( $upload_dir['basedir'], $upload_dir['baseurl'], $webp_path );
-			} elseif ( $is_home_url ) {
-				$relative_path = str_replace( ABSPATH, '', $webp_path );
-				$webp_url = $home_url . '/' . str_replace( '\\', '/', ltrim( $relative_path, '/' ) );
-			} elseif ( $is_relative_url ) {
-				$relative_path = str_replace( ABSPATH, '', $webp_path );
-				$webp_url = '/' . str_replace( '\\', '/', ltrim( $relative_path, '/' ) );
-			} else {
-				return $full_url;
-			}
-
-			// Normalize URL separators
-			$webp_url = str_replace( '\\', '/', $webp_url );
-			
-			return $webp_url . $query;
+		if ( $require_local_file && ! file_exists( $webp_path ) ) {
+			$this->stats['skipped_no_webp']++;
+			return $full_url;
 		}
 
-		return $full_url;
-	}
+		// Convert back to URL (preserve original URL structure)
+		if ( $is_upload_url ) {
+			$webp_url = str_replace( $upload_dir['basedir'], $upload_dir['baseurl'], $webp_path );
+		} elseif ( $is_cdn_url ) {
+			$webp_url = str_replace( $upload_dir['basedir'], $cdn_base_url, $webp_path );
+		} elseif ( $is_home_url || $is_site_url ) {
+			$relative_path = str_replace( ABSPATH, '', $webp_path );
+			$webp_url = ( $is_home_url ? $home_url : $site_url ) . '/' . str_replace( '\\', '/', ltrim( $relative_path, '/' ) );
+		} elseif ( $is_relative_url ) {
+			$relative_path = str_replace( ABSPATH, '', $webp_path );
+			$webp_url = '/' . str_replace( '\\', '/', ltrim( $relative_path, '/' ) );
+		} else {
+			return $full_url;
+		}
 
+		// Normalize URL separators
+		$webp_url = str_replace( '\\', '/', $webp_url );
+		
+		// Preserve query string and fragment
+		$this->stats['replaced']++;
+		return $webp_url . $query . $fragment;
+	}
 
 	/**
 	 * Get feature description
@@ -587,6 +1012,6 @@ class WPMH_Replace_Image_URLs {
 	 * @return string
 	 */
 	public function get_description() {
-		return __( 'One-time action to replace JPG/JPEG/PNG image URLs with WebP URLs throughout the WordPress database (posts, postmeta, options, theme mods). Handles serialized data, JSON data, and Gutenberg block attributes. Only replaces URLs if the corresponding WebP file exists. Never replaces external URLs. This action must be explicitly triggered.', 'webp-media-handler' );
+		return __( 'One-time action to replace JPG/JPEG/PNG image URLs with WebP URLs throughout the WordPress database (posts, postmeta, options, termmeta, usermeta, terms, term_taxonomy). Handles serialized data, JSON data, srcset attributes, CSS background-image, and Gutenberg block attributes. Only replaces URLs if the corresponding WebP file exists. Never replaces external URLs. Supports dry-run mode. This action must be explicitly triggered.', 'webp-media-handler' );
 	}
 }
