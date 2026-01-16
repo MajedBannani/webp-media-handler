@@ -218,17 +218,8 @@
 				data: postData,
 				success: function(response) {
 					if (response.success) {
-						// Update status
+						// Update status div (for progress feedback during processing)
 						$status.removeClass('info error').addClass('show success').text(response.data.message);
-
-						// Issue 1: Show inline notice for watermark action
-						if (action === 'apply_watermark') {
-							var $inlineNotice = $('#wpmh-watermark-inline-notice');
-							$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
-								.addClass('wpmh-inline-notice-success')
-								.text(response.data.message)
-								.show();
-						}
 
 						// If not completed, continue processing
 						if (!response.data.completed) {
@@ -238,17 +229,35 @@
 						} else {
 							// Re-enable button
 							$button.prop('disabled', false);
+							
+							// FIX: For watermark action, show inline notice via JS (immediate feedback)
+							// Flash message is set server-side, but we show it immediately via JS
+							// On page reload, PHP flash will be consumed, but we prevent duplicate by:
+							// 1. Only showing JS notice if inline container is empty (hasn't been shown yet)
+							// 2. PHP flash only renders on fresh page load (not during AJAX)
+							if (action === 'apply_watermark') {
+								var $inlineNotice = $('#wpmh-watermark-inline-notice');
+								// Only inject if container is empty/hidden (not already showing message)
+								if (!$inlineNotice.is(':visible') || !$inlineNotice.text().trim()) {
+									$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
+										.addClass('wpmh-inline-notice-success')
+										.text(response.data.message)
+										.show();
+								}
+							}
 						}
 					} else {
 						$status.removeClass('info success').addClass('show error').text(response.data.message || wpmhAdmin.strings.error);
 						
-						// Issue 1: Show inline error notice for watermark action
+						// Show error in inline notice for watermark action (only if container is empty)
 						if (action === 'apply_watermark') {
 							var $inlineNotice = $('#wpmh-watermark-inline-notice');
-							$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
-								.addClass('wpmh-inline-notice-error')
-								.text(response.data.message || wpmhAdmin.strings.error)
-								.show();
+							if (!$inlineNotice.is(':visible') || !$inlineNotice.text().trim()) {
+								$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
+									.addClass('wpmh-inline-notice-error')
+									.text(response.data.message || wpmhAdmin.strings.error)
+									.show();
+							}
 						}
 						
 						$button.prop('disabled', false);
@@ -257,13 +266,15 @@
 				error: function() {
 					$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error);
 					
-					// Issue 1: Show inline error notice for watermark action
+					// Show error in inline notice for watermark action (only if container is empty)
 					if (action === 'apply_watermark') {
 						var $inlineNotice = $('#wpmh-watermark-inline-notice');
-						$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
-							.addClass('wpmh-inline-notice-error')
-							.text(wpmhAdmin.strings.error)
-							.show();
+						if (!$inlineNotice.is(':visible') || !$inlineNotice.text().trim()) {
+							$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
+								.addClass('wpmh-inline-notice-error')
+								.text(wpmhAdmin.strings.error)
+								.show();
+						}
 					}
 					
 					$button.prop('disabled', false);

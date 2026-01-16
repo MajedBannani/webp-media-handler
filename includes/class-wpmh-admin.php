@@ -301,10 +301,20 @@ class WPMH_Admin {
 		$last_run = $log ? $log['timestamp'] : '';
 
 		// E: Read flash message (counts only, no watermark data)
+		// FIX: Only render flash message on fresh page load (not during AJAX)
+		// Flash message is set after watermark completion, then consumed here on next page render
 		$current_user_id = get_current_user_id();
-		$flash_notice = get_transient( 'wpmh_watermark_flash_' . $current_user_id );
-		if ( $flash_notice && is_array( $flash_notice ) ) {
-			delete_transient( 'wpmh_watermark_flash_' . $current_user_id );
+		$flash_notice = null;
+		
+		// Only read flash message if this is NOT an AJAX request
+		if ( ! defined( 'DOING_AJAX' ) || ! DOING_AJAX ) {
+			$flash_notice = get_transient( 'wpmh_watermark_flash_' . $current_user_id );
+			if ( $flash_notice && is_array( $flash_notice ) ) {
+				// Consume the flash message (read once, then delete)
+				delete_transient( 'wpmh_watermark_flash_' . $current_user_id );
+			} else {
+				$flash_notice = null;
+			}
 		}
 		?>
 		<div class="wpmh-feature-card wpmh-watermark-card">
@@ -428,7 +438,10 @@ class WPMH_Admin {
 						<?php esc_html_e( 'Apply Watermark', 'webp-media-handler' ); ?>
 					</button>
 					<div class="wpmh-action-status" id="wpmh-status-apply_watermark"></div>
-					<?php if ( ! empty( $flash_notice ) && isset( $flash_notice['message'] ) ) : ?>
+					<?php 
+					// FIX: Only render flash message if it exists AND we're not in AJAX context
+					// JavaScript will show immediate feedback, PHP flash is fallback for page reloads
+					if ( ! empty( $flash_notice ) && isset( $flash_notice['message'] ) && ( ! defined( 'DOING_AJAX' ) || ! DOING_AJAX ) ) : ?>
 						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice wpmh-inline-notice-<?php echo esc_attr( isset( $flash_notice['type'] ) ? $flash_notice['type'] : 'success' ); ?>">
 							<?php echo esc_html( $flash_notice['message'] ); ?>
 						</div>
