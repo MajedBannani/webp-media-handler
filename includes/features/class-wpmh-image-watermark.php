@@ -88,6 +88,26 @@ class WPMH_Image_Watermark {
 		$offset = isset( $_POST['offset'] ) ? absint( wp_unslash( $_POST['offset'] ) ) : 0;
 		$batch_size = 10; // Process 10 images at a time
 
+		// ISSUE 2 FIX: Initialize counters for CURRENT run only (not accumulated from previous runs)
+		// Reset counters at start of new run (offset === 0), otherwise continue tracking current run
+		$current_run_success = 0;
+		$current_run_failed = 0;
+		
+		if ( $offset > 0 ) {
+			// This is a continuation batch - get counts from current run tracking
+			$log = $this->settings->get_action_log( 'apply_watermark' );
+			$current_run_success = isset( $log['data']['current_run_success'] ) ? (int) $log['data']['current_run_success'] : 0;
+			$current_run_failed = isset( $log['data']['current_run_failed'] ) ? (int) $log['data']['current_run_failed'] : 0;
+		} else {
+			// Start of new run - reset counters (do not accumulate from previous runs)
+			// Clear any previous run data, keep only timestamp for "last run" display
+			$this->settings->log_action( 'apply_watermark', array(
+				'timestamp' => current_time( 'mysql' ),
+				'current_run_success' => 0,
+				'current_run_failed' => 0,
+			) );
+		}
+
 		// Get target images based on mode
 		$selected_ids = array();
 		if ( 'all' === $target_mode ) {
@@ -110,47 +130,52 @@ class WPMH_Image_Watermark {
 		}
 
 		if ( empty( $images ) ) {
-			// Get totals for final message
+			// ISSUE 2 FIX: Use CURRENT run counts for final message (not accumulated from previous runs)
+			// Get final counts from log (which tracks current run only)
 			$log = $this->settings->get_action_log( 'apply_watermark' );
-			$processed = isset( $log['data']['processed'] ) ? $log['data']['processed'] : 0;
-			$success = isset( $log['data']['success'] ) ? $log['data']['success'] : 0;
-			$failed = isset( $log['data']['failed'] ) ? $log['data']['failed'] : 0;
+			$final_success = isset( $log['data']['current_run_success'] ) ? (int) $log['data']['current_run_success'] : 0;
+			$final_failed = isset( $log['data']['current_run_failed'] ) ? (int) $log['data']['current_run_failed'] : 0;
+
+			// Clear current run counters (keep only timestamp)
+			$this->settings->log_action( 'apply_watermark', array(
+				'timestamp' => current_time( 'mysql' ),
+			) );
 
 			wp_send_json_success( array(
 				'message' => sprintf(
 					/* translators: 1: Success count, 2: Failed count */
 					__( 'Watermarking complete! Successfully processed %1$d images. Failed: %2$d.', 'webp-media-handler' ),
-					$success,
-					$failed
+					$final_success,
+					$final_failed
 				),
 				'completed' => true,
-				'success' => $success,
-				'failed' => $failed,
+				'success' => $final_success,
+				'failed' => $final_failed,
 			) );
 		}
 
-		// Process batch
-		$success_count = 0;
-		$failed_count = 0;
+		// Process batch - track counts for CURRENT run only
+		$batch_success = 0;
+		$batch_failed = 0;
 
 		foreach ( $images as $attachment_id ) {
 			if ( $this->apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position ) ) {
-				$success_count++;
+				$batch_success++;
 			} else {
-				$failed_count++;
+				$batch_failed++;
 			}
 		}
 
-		// Update log
-		$current_log = $this->settings->get_action_log( 'apply_watermark' );
-		$current_success = isset( $current_log['data']['success'] ) ? $current_log['data']['success'] : 0;
-		$current_failed = isset( $current_log['data']['failed'] ) ? $current_log['data']['failed'] : 0;
-		$current_processed = isset( $current_log['data']['processed'] ) ? $current_log['data']['processed'] : 0;
+		// Update current run totals (accumulate within this request only)
+		$current_run_success += $batch_success;
+		$current_run_failed += $batch_failed;
 
+		// ISSUE 2 FIX: Store only current run counts (not accumulated from previous runs)
+		// Reset counters if this is the first batch (offset === 0)
 		$this->settings->log_action( 'apply_watermark', array(
-			'success'   => $current_success + $success_count,
-			'failed'    => $current_failed + $failed_count,
-			'processed' => $current_processed + count( $images ),
+			'timestamp' => current_time( 'mysql' ),
+			'current_run_success' => $current_run_success,
+			'current_run_failed' => $current_run_failed,
 		) );
 
 		// Return progress

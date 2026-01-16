@@ -11,12 +11,30 @@
 	 * Admin functionality
 	 */
 	var WPMHAdmin = {
-		/**
-		 * Initialize
-		 */
-		init: function() {
-			this.bindEvents();
-		},
+	/**
+	 * Initialize
+	 */
+	init: function() {
+		this.bindEvents();
+		this.initWatermarkToggle();
+	},
+
+	/**
+	 * Initialize watermark settings section visibility based on toggle state (Issue 1 fix)
+	 */
+	initWatermarkToggle: function() {
+		var $toggle = $('.wpmh-feature-toggle[data-feature="image_watermark"]');
+		var $section = $('#wpmh-watermark-settings-section');
+		
+		if ($toggle.length && $section.length) {
+			var enabled = $toggle.is(':checked');
+			if (enabled) {
+				$section.show().attr('aria-hidden', 'false');
+			} else {
+				$section.hide().attr('aria-hidden', 'true');
+			}
+		}
+	},
 
 		/**
 		 * Bind events
@@ -50,6 +68,16 @@
 			var feature = $toggle.data('feature');
 			var enabled = $toggle.is(':checked');
 
+			// Toggle watermark settings section visibility immediately (Issue 1 fix)
+			if (feature === 'image_watermark') {
+				var $section = $('#wpmh-watermark-settings-section');
+				if (enabled) {
+					$section.show().attr('aria-hidden', 'false');
+				} else {
+					$section.hide().attr('aria-hidden', 'true');
+				}
+			}
+
 			// Disable toggle during request
 			$toggle.prop('disabled', true);
 
@@ -69,12 +97,22 @@
 					} else {
 						// Revert toggle
 						$toggle.prop('checked', !enabled);
+						// Revert visibility if toggle failed
+						if (feature === 'image_watermark') {
+							var $section = $('#wpmh-watermark-settings-section');
+							$section.toggle().attr('aria-hidden', enabled ? 'true' : 'false');
+						}
 						WPMHAdmin.showMessage($toggle.closest('.wpmh-feature-card'), response.data.message || wpmhAdmin.strings.error, 'error');
 					}
 				},
 				error: function() {
 					// Revert toggle
 					$toggle.prop('checked', !enabled);
+					// Revert visibility if request failed
+					if (feature === 'image_watermark') {
+						var $section = $('#wpmh-watermark-settings-section');
+						$section.toggle().attr('aria-hidden', enabled ? 'true' : 'false');
+					}
 					WPMHAdmin.showMessage($toggle.closest('.wpmh-feature-card'), wpmhAdmin.strings.error, 'error');
 				},
 				complete: function() {

@@ -311,7 +311,7 @@ class WPMH_Admin {
 				<p><?php echo esc_html( $this->features['image_watermark']->get_description() ); ?></p>
 			</div>
 
-			<?php if ( $enabled ) : ?>
+			<div id="wpmh-watermark-settings-section" style="display: <?php echo $enabled ? 'block' : 'none'; ?>" aria-hidden="<?php echo $enabled ? 'false' : 'true'; ?>">
 				<div class="wpmh-watermark-settings">
 					<h3><?php esc_html_e( 'Watermark Settings', 'webp-media-handler' ); ?></h3>
 
@@ -412,7 +412,7 @@ class WPMH_Admin {
 					</button>
 					<div class="wpmh-action-status" id="wpmh-status-apply_watermark"></div>
 				</div>
-			<?php endif; ?>
+			</div>
 		</div>
 		<?php
 	}
