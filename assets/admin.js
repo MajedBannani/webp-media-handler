@@ -27,6 +27,19 @@
 
 			// Action buttons
 			$(document).on('click', '.wpmh-action-button', this.handleAction);
+
+			// Watermark image selection
+			$(document).on('click', '.wpmh-select-watermark-image', this.selectWatermarkImage);
+			$(document).on('click', '.wpmh-remove-watermark-image', this.removeWatermarkImage);
+			
+			// Target mode change
+			$(document).on('change', 'input[name="wpmh-watermark-target-mode"]', this.handleTargetModeChange);
+			
+			// Select images button
+			$(document).on('click', '.wpmh-select-images-btn', this.selectTargetImages);
+			
+			// Save watermark settings when changed
+			$(document).on('change', '.wpmh-watermark-size-select, .wpmh-watermark-position-select, input[name="wpmh-watermark-target-mode"]', this.saveWatermarkSettings);
 		},
 
 		/**
@@ -88,6 +101,25 @@
 				confirmMessage = wpmhAdmin.strings.confirmConvert;
 			} else if (action === 'replace_urls') {
 				confirmMessage = wpmhAdmin.strings.confirmReplace;
+			} else if (action === 'apply_watermark') {
+				// Validate watermark settings before confirmation
+				var watermarkId = $('#wpmh-watermark-image-id').val();
+				if (!watermarkId || watermarkId === '0') {
+					alert(wpmhAdmin.strings.selectWatermark);
+					return;
+				}
+
+				var targetMode = $('input[name="wpmh-watermark-target-mode"]:checked').val();
+				if (targetMode === 'selected') {
+					var selectedImages = WPMHAdmin.getSelectedImageIds();
+					if (selectedImages.length === 0) {
+						alert(wpmhAdmin.strings.selectImages);
+						return;
+					}
+					confirmMessage = wpmhAdmin.strings.confirmWatermark;
+				} else {
+					confirmMessage = wpmhAdmin.strings.confirmWatermarkAll;
+				}
 			}
 
 			if (confirmMessage && !confirm(confirmMessage)) {
@@ -118,16 +150,33 @@
 				nonce = wpmhAdmin.nonces.convert_existing;
 			} else if (nonceAction === 'wpmh_replace_image_urls') {
 				nonce = wpmhAdmin.nonces.replace_urls;
+			} else if (nonceAction === 'wpmh_apply_watermark') {
+				nonce = wpmhAdmin.nonces.apply_watermark;
+			}
+
+			// Prepare data
+			var postData = {
+				action: nonceAction,
+				nonce: nonce,
+				offset: offset
+			};
+
+			// Add watermark-specific data
+			if (nonceAction === 'wpmh_apply_watermark') {
+				postData.watermark_id = $('#wpmh-watermark-image-id').val();
+				postData.watermark_size = $('#wpmh-watermark-size').val();
+				postData.watermark_position = $('#wpmh-watermark-position').val();
+				postData.target_mode = $('input[name="wpmh-watermark-target-mode"]:checked').val();
+				
+				if (postData.target_mode === 'selected') {
+					postData.selected_images = WPMHAdmin.getSelectedImageIds();
+				}
 			}
 
 			$.ajax({
 				url: wpmhAdmin.ajaxUrl,
 				type: 'POST',
-				data: {
-					action: nonceAction,
-					nonce: nonce,
-					offset: offset
-				},
+				data: postData,
 				success: function(response) {
 					if (response.success) {
 						// Update status
@@ -168,8 +217,187 @@
 					$(this).remove();
 				});
 			}, 3000);
+		},
+
+		/**
+		 * Select watermark image from media library
+		 */
+		selectWatermarkImage: function(e) {
+			e.preventDefault();
+
+			var frame = wp.media({
+				title: 'Select Watermark Image',
+				button: {
+					text: 'Use as Watermark'
+				},
+				multiple: false,
+				library: {
+					type: 'image'
+				}
+			});
+
+			frame.on('select', function() {
+				var attachment = frame.state().get('selection').first().toJSON();
+				$('#wpmh-watermark-image-id').val(attachment.id);
+				
+				var $preview = $('#wpmh-watermark-preview');
+				$preview.html('<img src="' + attachment.sizes.thumbnail.url + '" style="max-width: 150px; height: auto;">');
+				$preview.show();
+				$('.wpmh-remove-watermark-image').show();
+
+				// Save watermark image ID
+				WPMHAdmin.saveWatermarkImageId(attachment.id);
+			});
+
+			frame.open();
+		},
+
+		/**
+		 * Remove watermark image
+		 */
+		removeWatermarkImage: function(e) {
+			e.preventDefault();
+			$('#wpmh-watermark-image-id').val(0);
+			$('#wpmh-watermark-preview').hide().html('');
+			$(this).hide();
+			WPMHAdmin.saveWatermarkImageId(0);
+		},
+
+		/**
+		 * Handle target mode change
+		 */
+		handleTargetModeChange: function() {
+			var mode = $(this).val();
+			if (mode === 'selected') {
+				$('#wpmh-selected-images-container').show();
+			} else {
+				$('#wpmh-selected-images-container').hide();
+			}
+		},
+
+		/**
+		 * Select target images from media library
+		 */
+		selectTargetImages: function(e) {
+			e.preventDefault();
+
+			var selectedIds = WPMHAdmin.getSelectedImageIds();
+
+			var frame = wp.media({
+				title: 'Select Images to Watermark',
+				button: {
+					text: 'Select Images'
+				},
+				multiple: true,
+				library: {
+					type: 'image'
+				}
+			});
+
+			// Pre-select currently selected images
+			if (selectedIds.length > 0) {
+				var selection = frame.state().get('selection');
+				selectedIds.forEach(function(id) {
+					var attachment = wp.media.attachment(id);
+					attachment.fetch();
+					selection.add(attachment);
+				});
+			}
+
+			frame.on('select', function() {
+				var selected = frame.state().get('selection').map(function(attachment) {
+					return attachment.toJSON();
+				});
+
+				WPMHAdmin.displaySelectedImages(selected);
+			});
+
+			frame.open();
+		},
+
+		/**
+		 * Display selected images
+		 */
+		displaySelectedImages: function(images) {
+			var $container = $('#wpmh-selected-images-list');
+			
+			if (images.length === 0) {
+				$container.html('<p class="description">' + wpmhAdmin.strings.selectImages + '</p>');
+				return;
+			}
+
+			var html = '<div class="wpmh-selected-images-grid">';
+			html += '<p><strong>' + images.length + ' ' + (images.length === 1 ? 'image' : 'images') + ' selected.</strong></p>';
+			images.forEach(function(image) {
+				html += '<div class="wpmh-selected-image-item" data-id="' + image.id + '">';
+				html += '<img src="' + (image.sizes.thumbnail ? image.sizes.thumbnail.url : image.url) + '" style="max-width: 80px; height: auto;">';
+				html += '<button type="button" class="button-link wpmh-remove-selected-image" data-id="' + image.id + '">×</button>';
+				html += '</div>';
+			});
+			html += '</div>';
+
+			$container.html(html);
+		},
+
+		/**
+		 * Get selected image IDs
+		 */
+		getSelectedImageIds: function() {
+			var ids = [];
+			$('.wpmh-selected-image-item').each(function() {
+				ids.push(parseInt($(this).data('id'), 10));
+			});
+			return ids;
+		},
+
+		/**
+		 * Save watermark image ID via AJAX
+		 */
+		saveWatermarkImageId: function(imageId) {
+			$.ajax({
+				url: wpmhAdmin.ajaxUrl,
+				type: 'POST',
+				data: {
+					action: 'wpmh_save_watermark_settings',
+					nonce: wpmhAdmin.nonces.toggle,
+					setting: 'watermark_image_id',
+					value: imageId
+				}
+			});
+		},
+
+		/**
+		 * Save watermark settings
+		 */
+		saveWatermarkSettings: function() {
+			var settings = {
+				watermark_size: $('#wpmh-watermark-size').val(),
+				watermark_position: $('#wpmh-watermark-position').val(),
+				watermark_target_mode: $('input[name="wpmh-watermark-target-mode"]:checked').val()
+			};
+
+			$.ajax({
+				url: wpmhAdmin.ajaxUrl,
+				type: 'POST',
+				data: {
+					action: 'wpmh_save_watermark_settings',
+					nonce: wpmhAdmin.nonces.toggle,
+					settings: settings
+				}
+			});
 		}
 	};
+
+	// Handle remove selected image
+	$(document).on('click', '.wpmh-remove-selected-image', function(e) {
+		e.preventDefault();
+		$(this).closest('.wpmh-selected-image-item').remove();
+		
+		// Update display if no images left
+		if ($('.wpmh-selected-image-item').length === 0) {
+			$('#wpmh-selected-images-list').html('<p class="description">' + wpmhAdmin.strings.selectImages + '</p>');
+		}
+	});
 
 	// Initialize on document ready
 	$(document).ready(function() {

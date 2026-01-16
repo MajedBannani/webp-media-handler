@@ -39,6 +39,7 @@ class WPMH_Settings_Manager {
 	private $defaults = array(
 		'disable_image_sizes' => false,
 		'auto_webp_convert'   => false,
+		'image_watermark'     => false,
 	);
 
 	/**

@@ -247,3 +247,100 @@
 	color: #2271b1;
 	text-decoration: underline;
 }
+
+/* Watermark Settings */
+.wpmh-watermark-settings {
+	margin-top: 20px;
+	padding-top: 20px;
+	border-top: 1px solid #ddd;
+}
+
+.wpmh-watermark-settings h3 {
+	margin-top: 0;
+	font-size: 16px;
+}
+
+.wpmh-watermark-field {
+	margin-bottom: 20px;
+}
+
+.wpmh-watermark-field label {
+	display: block;
+	margin-bottom: 8px;
+}
+
+.wpmh-watermark-field select {
+	min-width: 200px;
+}
+
+.wpmh-watermark-image-selector {
+	margin-bottom: 10px;
+}
+
+.wpmh-watermark-preview {
+	margin-top: 10px;
+	padding: 10px;
+	background: #f0f0f1;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+}
+
+.wpmh-watermark-target-mode label {
+	display: block;
+	margin-bottom: 10px;
+	font-weight: normal;
+}
+
+.wpmh-warning-text {
+	color: #d63638;
+	font-weight: normal;
+}
+
+.wpmh-selected-images-container {
+	margin-top: 15px;
+}
+
+.wpmh-selected-images-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+	gap: 10px;
+	margin-top: 10px;
+}
+
+.wpmh-selected-image-item {
+	position: relative;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	padding: 5px;
+	background: #f9f9f9;
+}
+
+.wpmh-selected-image-item img {
+	width: 100%;
+	height: auto;
+	display: block;
+}
+
+.wpmh-remove-selected-image {
+	position: absolute;
+	top: -5px;
+	right: -5px;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: #d63638;
+	color: #fff;
+	border: 2px solid #fff;
+	cursor: pointer;
+	font-size: 18px;
+	line-height: 20px;
+	text-align: center;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+}
+
+.wpmh-remove-selected-image:hover {
+	background: #b32d2e;
+}

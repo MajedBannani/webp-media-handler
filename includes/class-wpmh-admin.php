@@ -50,6 +50,7 @@ class WPMH_Admin {
 		add_action( 'admin_menu', array( $this, 'add_admin_menu' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
 		add_action( 'wp_ajax_wpmh_toggle_feature', array( $this, 'handle_toggle' ) );
+		add_action( 'wp_ajax_wpmh_save_watermark_settings', array( $this, 'handle_save_watermark_settings' ) );
 	}
 
 	/**
@@ -92,6 +93,9 @@ class WPMH_Admin {
 			true
 		);
 
+		// Enqueue media library for watermark image selection
+		wp_enqueue_media();
+
 		wp_localize_script(
 			'wpmh-admin-script',
 			'wpmhAdmin',
@@ -101,12 +105,17 @@ class WPMH_Admin {
 					'toggle'              => wp_create_nonce( 'wpmh_toggle_feature' ),
 					'convert_existing'    => wp_create_nonce( 'wpmh_convert_existing_webp' ),
 					'replace_urls'        => wp_create_nonce( 'wpmh_replace_image_urls' ),
+					'apply_watermark'     => wp_create_nonce( 'wpmh_apply_watermark' ),
 				),
 				'strings' => array(
 					'confirmConvert' => __( 'This will convert all existing JPEG/PNG images to WebP. This action cannot be undone automatically. Continue?', 'webp-media-handler' ),
 					'confirmReplace' => __( 'This will replace image URLs throughout your site. This action cannot be undone automatically. Continue?', 'webp-media-handler' ),
+					'confirmWatermark' => __( 'This will apply watermarks to selected images. This action will modify your images and cannot be undone automatically. Continue?', 'webp-media-handler' ),
+					'confirmWatermarkAll' => __( 'This will apply watermarks to ALL images in your media library. This action will modify your images and cannot be undone automatically. Are you sure you want to continue?', 'webp-media-handler' ),
 					'processing'     => __( 'Processing...', 'webp-media-handler' ),
 					'error'          => __( 'An error occurred. Please try again.', 'webp-media-handler' ),
+					'selectWatermark' => __( 'Please select a watermark image.', 'webp-media-handler' ),
+					'selectImages'   => __( 'Please select at least one image to watermark.', 'webp-media-handler' ),
 				),
 			)
 		);
@@ -131,7 +140,7 @@ class WPMH_Admin {
 		$enabled = ( '1' === $enabled || 'true' === $enabled );
 
 		// Validate feature name
-		$allowed_features = array( 'disable_image_sizes', 'auto_webp_convert' );
+		$allowed_features = array( 'disable_image_sizes', 'auto_webp_convert', 'image_watermark' );
 		if ( ! in_array( $feature, $allowed_features, true ) ) {
 			wp_send_json_error( array( 'message' => __( 'Invalid feature.', 'webp-media-handler' ) ) );
 		}
@@ -188,6 +197,8 @@ class WPMH_Admin {
 					'wpmh_replace_image_urls',
 					__( 'Replace Image URLs', 'webp-media-handler' )
 				); ?>
+
+				<?php $this->render_watermark_card(); ?>
 			</div>
 
 			<?php $this->render_precaution_note(); ?>
@@ -270,6 +281,194 @@ class WPMH_Admin {
 			</div>
 		</div>
 		<?php
+	}
+
+	/**
+	 * Render watermark feature card
+	 */
+	private function render_watermark_card() {
+		$enabled = $this->settings->get( 'image_watermark', false );
+		$watermark_id = $this->settings->get( 'watermark_image_id', 0 );
+		$watermark_size = $this->settings->get( 'watermark_size', 100 );
+		$watermark_position = $this->settings->get( 'watermark_position', 'bottom-right' );
+		$target_mode = $this->settings->get( 'watermark_target_mode', 'selected' );
+		
+		$log = $this->settings->get_action_log( 'apply_watermark' );
+		$last_run = $log ? $log['timestamp'] : '';
+		?>
+		<div class="wpmh-feature-card wpmh-watermark-card">
+			<div class="wpmh-feature-header">
+				<h2><?php esc_html_e( 'Image Watermarking', 'webp-media-handler' ); ?></h2>
+				<label class="wpmh-toggle-switch">
+					<input type="checkbox" 
+					       class="wpmh-feature-toggle" 
+					       data-feature="image_watermark"
+					       <?php checked( $enabled, true ); ?>>
+					<span class="wpmh-toggle-slider"></span>
+				</label>
+			</div>
+			<div class="wpmh-feature-description">
+				<p><?php echo esc_html( $this->features['image_watermark']->get_description() ); ?></p>
+			</div>
+
+			<?php if ( $enabled ) : ?>
+				<div class="wpmh-watermark-settings">
+					<h3><?php esc_html_e( 'Watermark Settings', 'webp-media-handler' ); ?></h3>
+
+					<div class="wpmh-watermark-field">
+						<label for="wpmh-watermark-image">
+							<strong><?php esc_html_e( 'Watermark Image:', 'webp-media-handler' ); ?></strong>
+						</label>
+						<div class="wpmh-watermark-image-selector">
+							<button type="button" class="button wpmh-select-watermark-image" id="wpmh-select-watermark-btn">
+								<?php esc_html_e( 'Select Watermark Image', 'webp-media-handler' ); ?>
+							</button>
+							<button type="button" class="button-link wpmh-remove-watermark-image" style="display: <?php echo $watermark_id ? 'inline' : 'none'; ?>;">
+								<?php esc_html_e( 'Remove', 'webp-media-handler' ); ?>
+							</button>
+							<input type="hidden" id="wpmh-watermark-image-id" value="<?php echo esc_attr( $watermark_id ); ?>">
+							<div class="wpmh-watermark-preview" id="wpmh-watermark-preview" style="display: <?php echo $watermark_id ? 'block' : 'none'; ?>;">
+								<?php if ( $watermark_id ) : ?>
+									<?php echo wp_get_attachment_image( $watermark_id, 'thumbnail', false, array( 'style' => 'max-width: 150px; height: auto;' ) ); ?>
+								<?php endif; ?>
+							</div>
+							<p class="description">
+								<?php esc_html_e( 'Select a PNG, JPG, or WebP image from your Media Library to use as a watermark.', 'webp-media-handler' ); ?>
+							</p>
+						</div>
+					</div>
+
+					<div class="wpmh-watermark-field">
+						<label for="wpmh-watermark-size">
+							<strong><?php esc_html_e( 'Watermark Size:', 'webp-media-handler' ); ?></strong>
+						</label>
+						<select id="wpmh-watermark-size" class="wpmh-watermark-size-select">
+							<option value="50" <?php selected( $watermark_size, 50 ); ?>>50px</option>
+							<option value="100" <?php selected( $watermark_size, 100 ); ?>>100px</option>
+							<option value="200" <?php selected( $watermark_size, 200 ); ?>>200px</option>
+							<option value="300" <?php selected( $watermark_size, 300 ); ?>>300px</option>
+						</select>
+						<p class="description">
+							<?php esc_html_e( 'Maximum width of the watermark. The watermark will be resized proportionally and will not be upscaled.', 'webp-media-handler' ); ?>
+						</p>
+					</div>
+
+					<div class="wpmh-watermark-field">
+						<label for="wpmh-watermark-position">
+							<strong><?php esc_html_e( 'Watermark Position:', 'webp-media-handler' ); ?></strong>
+						</label>
+						<select id="wpmh-watermark-position" class="wpmh-watermark-position-select">
+							<option value="top-left" <?php selected( $watermark_position, 'top-left' ); ?>><?php esc_html_e( 'Top Left', 'webp-media-handler' ); ?></option>
+							<option value="top-right" <?php selected( $watermark_position, 'top-right' ); ?>><?php esc_html_e( 'Top Right', 'webp-media-handler' ); ?></option>
+							<option value="bottom-left" <?php selected( $watermark_position, 'bottom-left' ); ?>><?php esc_html_e( 'Bottom Left', 'webp-media-handler' ); ?></option>
+							<option value="bottom-right" <?php selected( $watermark_position, 'bottom-right' ); ?>><?php esc_html_e( 'Bottom Right', 'webp-media-handler' ); ?></option>
+							<option value="center" <?php selected( $watermark_position, 'center' ); ?>><?php esc_html_e( 'Center', 'webp-media-handler' ); ?></option>
+						</select>
+						<p class="description">
+							<?php esc_html_e( 'Position where the watermark will be placed. A minimum padding of 20px from edges will be maintained.', 'webp-media-handler' ); ?>
+						</p>
+					</div>
+
+					<div class="wpmh-watermark-field">
+						<label>
+							<strong><?php esc_html_e( 'Target Images:', 'webp-media-handler' ); ?></strong>
+						</label>
+						<div class="wpmh-watermark-target-mode">
+							<label>
+								<input type="radio" name="wpmh-watermark-target-mode" value="selected" <?php checked( $target_mode, 'selected' ); ?>>
+								<?php esc_html_e( 'Selected Images', 'webp-media-handler' ); ?>
+							</label>
+							<br>
+							<label>
+								<input type="radio" name="wpmh-watermark-target-mode" value="all" <?php checked( $target_mode, 'all' ); ?>>
+								<?php esc_html_e( 'All Images', 'webp-media-handler' ); ?>
+								<strong class="wpmh-warning-text"><?php esc_html_e( '(Applies to all images in Media Library)', 'webp-media-handler' ); ?></strong>
+							</label>
+						</div>
+						<div class="wpmh-selected-images-container" id="wpmh-selected-images-container" style="display: <?php echo ( 'selected' === $target_mode ) ? 'block' : 'none'; ?>;">
+							<button type="button" class="button wpmh-select-images-btn" id="wpmh-select-images-btn">
+								<?php esc_html_e( 'Select Images from Media Library', 'webp-media-handler' ); ?>
+							</button>
+							<div class="wpmh-selected-images-list" id="wpmh-selected-images-list">
+								<p class="description"><?php esc_html_e( 'No images selected. Click the button above to select images.', 'webp-media-handler' ); ?></p>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<?php if ( $last_run ) : ?>
+					<div class="wpmh-last-run">
+						<strong><?php esc_html_e( 'Last run:', 'webp-media-handler' ); ?></strong>
+						<?php echo esc_html( $last_run ); ?>
+					</div>
+				<?php endif; ?>
+
+				<div class="wpmh-feature-actions">
+					<button type="button" 
+					        class="button button-primary wpmh-action-button wpmh-apply-watermark-btn" 
+					        data-action="apply_watermark"
+					        data-nonce-action="wpmh_apply_watermark">
+						<?php esc_html_e( 'Apply Watermark', 'webp-media-handler' ); ?>
+					</button>
+					<div class="wpmh-action-status" id="wpmh-status-apply_watermark"></div>
+				</div>
+			<?php endif; ?>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Handle save watermark settings AJAX request
+	 */
+	public function handle_save_watermark_settings() {
+		// Security checks
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
+		}
+
+		check_ajax_referer( 'wpmh_toggle_feature', 'nonce' );
+
+		// WordPress.org compliance: wp_unslash() before sanitization
+		if ( isset( $_POST['setting'] ) && isset( $_POST['value'] ) ) {
+			// Save single setting
+			$setting = sanitize_text_field( wp_unslash( $_POST['setting'] ) );
+			$value = wp_unslash( $_POST['value'] );
+			
+			// Validate and sanitize value based on setting
+			if ( 'watermark_image_id' === $setting ) {
+				$value = absint( $value );
+			}
+			
+			$this->settings->set( $setting, $value );
+			wp_send_json_success();
+		} elseif ( isset( $_POST['settings'] ) && is_array( $_POST['settings'] ) ) {
+			// Save multiple settings
+			$settings = array_map( 'wp_unslash', $_POST['settings'] );
+			
+			// Sanitize each setting
+			if ( isset( $settings['watermark_size'] ) ) {
+				$settings['watermark_size'] = absint( $settings['watermark_size'] );
+			}
+			if ( isset( $settings['watermark_position'] ) ) {
+				$allowed_positions = array( 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center' );
+				if ( ! in_array( $settings['watermark_position'], $allowed_positions, true ) ) {
+					unset( $settings['watermark_position'] );
+				}
+			}
+			if ( isset( $settings['watermark_target_mode'] ) ) {
+				$allowed_modes = array( 'selected', 'all' );
+				if ( ! in_array( $settings['watermark_target_mode'], $allowed_modes, true ) ) {
+					unset( $settings['watermark_target_mode'] );
+				}
+			}
+			
+			foreach ( $settings as $key => $value ) {
+				$this->settings->set( $key, $value );
+			}
+			wp_send_json_success();
+		}
+
+		wp_send_json_error( array( 'message' => __( 'Invalid request.', 'webp-media-handler' ) ) );
 	}
 
 	/**

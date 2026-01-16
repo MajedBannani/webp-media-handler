@@ -1,0 +1,569 @@
+<?php
+/**
+ * Image Watermarking Feature
+ *
+ * Allows users to apply watermarks to images with explicit user control.
+ * Must be explicitly triggered via admin action button.
+ *
+ * @package WebPMediaHandler
+ */
+
+// Exit if accessed directly
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+/**
+ * Image Watermark Feature Class
+ */
+class WPMH_Image_Watermark {
+
+	/**
+	 * Settings manager instance
+	 *
+	 * @var WPMH_Settings_Manager
+	 */
+	private $settings;
+
+	/**
+	 * Constructor
+	 *
+	 * @param WPMH_Settings_Manager $settings Settings manager instance.
+	 */
+	public function __construct( $settings ) {
+		$this->settings = $settings;
+		$this->init_hooks();
+	}
+
+	/**
+	 * Initialize hooks
+	 */
+	private function init_hooks() {
+		// Handle AJAX action for applying watermarks
+		add_action( 'wp_ajax_wpmh_apply_watermark', array( $this, 'handle_apply_watermark' ) );
+	}
+
+	/**
+	 * Handle apply watermark action
+	 */
+	public function handle_apply_watermark() {
+		// Security checks
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'webp-media-handler' ) ) );
+		}
+
+		check_ajax_referer( 'wpmh_apply_watermark', 'nonce' );
+
+		// Check if GD library is available
+		if ( ! $this->is_gd_available() ) {
+			wp_send_json_error( array( 'message' => __( 'GD library is not available. Watermarking requires GD extension.', 'webp-media-handler' ) ) );
+		}
+
+		// Get watermark configuration
+		// WordPress.org compliance: wp_unslash() before sanitization
+		$watermark_id = isset( $_POST['watermark_id'] ) ? absint( wp_unslash( $_POST['watermark_id'] ) ) : 0;
+		$watermark_size = isset( $_POST['watermark_size'] ) ? absint( wp_unslash( $_POST['watermark_size'] ) ) : 100;
+		$watermark_position = isset( $_POST['watermark_position'] ) ? sanitize_text_field( wp_unslash( $_POST['watermark_position'] ) ) : 'bottom-right';
+		$target_mode = isset( $_POST['target_mode'] ) ? sanitize_text_field( wp_unslash( $_POST['target_mode'] ) ) : 'selected';
+
+		// Validate watermark image
+		if ( ! $watermark_id || ! $this->validate_watermark_image( $watermark_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid or missing watermark image. Please select a valid image from the Media Library.', 'webp-media-handler' ) ) );
+		}
+
+		// Validate watermark size
+		$allowed_sizes = array( 50, 100, 200, 300 );
+		if ( ! in_array( $watermark_size, $allowed_sizes, true ) ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid watermark size.', 'webp-media-handler' ) ) );
+		}
+
+		// Validate watermark position
+		$allowed_positions = array( 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center' );
+		if ( ! in_array( $watermark_position, $allowed_positions, true ) ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid watermark position.', 'webp-media-handler' ) ) );
+		}
+
+		// Get batch parameters
+		$offset = isset( $_POST['offset'] ) ? absint( wp_unslash( $_POST['offset'] ) ) : 0;
+		$batch_size = 10; // Process 10 images at a time
+
+		// Get target images based on mode
+		$selected_ids = array();
+		if ( 'all' === $target_mode ) {
+			$images = $this->get_all_images( $offset, $batch_size );
+		} else {
+			// Get selected images from POST data
+			$selected_ids = isset( $_POST['selected_images'] ) ? wp_unslash( $_POST['selected_images'] ) : array();
+			if ( ! is_array( $selected_ids ) ) {
+				$selected_ids = array();
+			}
+			$selected_ids = array_map( 'absint', $selected_ids );
+			$selected_ids = array_filter( $selected_ids );
+			$selected_ids = array_values( $selected_ids ); // Re-index array
+			
+			if ( empty( $selected_ids ) ) {
+				wp_send_json_error( array( 'message' => __( 'No images selected. Please select images to watermark.', 'webp-media-handler' ) ) );
+			}
+			
+			$images = $this->get_selected_images( $selected_ids, $offset, $batch_size );
+		}
+
+		if ( empty( $images ) ) {
+			// Get totals for final message
+			$log = $this->settings->get_action_log( 'apply_watermark' );
+			$processed = isset( $log['data']['processed'] ) ? $log['data']['processed'] : 0;
+			$success = isset( $log['data']['success'] ) ? $log['data']['success'] : 0;
+			$failed = isset( $log['data']['failed'] ) ? $log['data']['failed'] : 0;
+
+			wp_send_json_success( array(
+				'message' => sprintf(
+					/* translators: 1: Success count, 2: Failed count */
+					__( 'Watermarking complete! Successfully processed %1$d images. Failed: %2$d.', 'webp-media-handler' ),
+					$success,
+					$failed
+				),
+				'completed' => true,
+				'success' => $success,
+				'failed' => $failed,
+			) );
+		}
+
+		// Process batch
+		$success_count = 0;
+		$failed_count = 0;
+
+		foreach ( $images as $attachment_id ) {
+			if ( $this->apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position ) ) {
+				$success_count++;
+			} else {
+				$failed_count++;
+			}
+		}
+
+		// Update log
+		$current_log = $this->settings->get_action_log( 'apply_watermark' );
+		$current_success = isset( $current_log['data']['success'] ) ? $current_log['data']['success'] : 0;
+		$current_failed = isset( $current_log['data']['failed'] ) ? $current_log['data']['failed'] : 0;
+		$current_processed = isset( $current_log['data']['processed'] ) ? $current_log['data']['processed'] : 0;
+
+		$this->settings->log_action( 'apply_watermark', array(
+			'success'   => $current_success + $success_count,
+			'failed'    => $current_failed + $failed_count,
+			'processed' => $current_processed + count( $images ),
+		) );
+
+		// Return progress
+		$total = ( 'all' === $target_mode ) ? $this->get_total_images() : count( $selected_ids );
+		$processed = $offset + count( $images );
+
+		wp_send_json_success( array(
+			'message' => sprintf(
+				/* translators: 1: Processed count, 2: Total count */
+				__( 'Processing... %1$d of %2$d images processed.', 'webp-media-handler' ),
+				$processed,
+				$total
+			),
+			'offset' => $processed,
+			'success' => $success_count,
+			'failed' => $failed_count,
+			'completed' => false,
+		) );
+	}
+
+	/**
+	 * Get all images in media library
+	 *
+	 * @param int $offset Offset for pagination.
+	 * @param int $limit Number of images to retrieve.
+	 * @return array Array of attachment IDs.
+	 */
+	private function get_all_images( $offset = 0, $limit = 10 ) {
+		$args = array(
+			'post_type'      => 'attachment',
+			'post_mime_type' => 'image',
+			'post_status'    => 'any',
+			'posts_per_page' => $limit,
+			'offset'         => $offset,
+			'fields'         => 'ids',
+			'orderby'        => 'ID',
+			'order'          => 'ASC',
+		);
+
+		$query = new WP_Query( $args );
+		return $query->posts;
+	}
+
+	/**
+	 * Get selected images
+	 *
+	 * @param array $selected_ids Selected attachment IDs.
+	 * @param int   $offset Offset for pagination.
+	 * @param int   $limit Number of images to retrieve.
+	 * @return array Array of attachment IDs.
+	 */
+	private function get_selected_images( $selected_ids, $offset = 0, $limit = 10 ) {
+		if ( empty( $selected_ids ) ) {
+			return array();
+		}
+
+		// Get batch from selected IDs
+		$batch = array_slice( $selected_ids, $offset, $limit );
+		
+		return $batch;
+	}
+
+	/**
+	 * Get total count of images
+	 *
+	 * @return int
+	 */
+	private function get_total_images() {
+		$args = array(
+			'post_type'      => 'attachment',
+			'post_mime_type' => 'image',
+			'post_status'    => 'any',
+			'posts_per_page' => -1,
+			'fields'         => 'ids',
+		);
+
+		$query = new WP_Query( $args );
+		return $query->found_posts;
+	}
+
+	/**
+	 * Apply watermark to an image
+	 *
+	 * @param int    $attachment_id Target attachment ID.
+	 * @param int    $watermark_id  Watermark attachment ID.
+	 * @param int    $watermark_size Maximum width of watermark in pixels.
+	 * @param string $watermark_position Position of watermark.
+	 * @return bool True on success, false on failure.
+	 */
+	private function apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position ) {
+		// Get target image file
+		$target_file = get_attached_file( $attachment_id );
+		if ( ! $target_file || ! file_exists( $target_file ) ) {
+			return false;
+		}
+
+		// Get watermark image file
+		$watermark_file = get_attached_file( $watermark_id );
+		if ( ! $watermark_file || ! file_exists( $watermark_file ) ) {
+			return false;
+		}
+
+		// Load target image
+		$target_image = $this->load_image( $target_file );
+		if ( ! $target_image ) {
+			return false;
+		}
+
+		// Load watermark image
+		$watermark_image = $this->load_image( $watermark_file );
+		if ( ! $watermark_image ) {
+			imagedestroy( $target_image );
+			return false;
+		}
+
+		// Get image dimensions
+		$target_width = imagesx( $target_image );
+		$target_height = imagesy( $target_image );
+		$watermark_width = imagesx( $watermark_image );
+		$watermark_height = imagesy( $watermark_image );
+
+		// Resize watermark if needed (proportionally, no upscaling)
+		$resized_watermark = $this->resize_watermark( $watermark_image, $watermark_size, $target_width, $target_height );
+		if ( $resized_watermark !== $watermark_image ) {
+			imagedestroy( $watermark_image );
+			$watermark_image = $resized_watermark;
+		}
+
+		$final_watermark_width = imagesx( $watermark_image );
+		$final_watermark_height = imagesy( $watermark_image );
+
+		// Calculate watermark position with padding
+		$padding = 20;
+		$position = $this->calculate_watermark_position(
+			$target_width,
+			$target_height,
+			$final_watermark_width,
+			$final_watermark_height,
+			$watermark_position,
+			$padding
+		);
+
+		// Apply watermark with alpha transparency
+		$this->apply_watermark_with_alpha( $target_image, $watermark_image, $position['x'], $position['y'] );
+
+		// Clean up watermark resource
+		imagedestroy( $watermark_image );
+
+		// Save watermarked image
+		$success = $this->save_image( $target_image, $target_file );
+
+		// Clean up target resource
+		imagedestroy( $target_image );
+
+		if ( ! $success ) {
+			return false;
+		}
+
+		// Regenerate attachment metadata
+		$metadata = wp_generate_attachment_metadata( $attachment_id, $target_file );
+		wp_update_attachment_metadata( $attachment_id, $metadata );
+
+		return true;
+	}
+
+	/**
+	 * Load image from file
+	 *
+	 * @param string $file_path Image file path.
+	 * @return resource|GdImage|false Image resource or false on failure.
+	 */
+	private function load_image( $file_path ) {
+		if ( ! file_exists( $file_path ) ) {
+			return false;
+		}
+
+		$file_type = wp_check_filetype( $file_path );
+		$mime_type = $file_type['type'];
+
+		// WordPress.org compliance: PHP 8+ compatibility - GD resources are objects in PHP 8+
+		$image = false;
+		switch ( $mime_type ) {
+			case 'image/jpeg':
+				if ( function_exists( 'imagecreatefromjpeg' ) ) {
+					$image = imagecreatefromjpeg( $file_path );
+				}
+				break;
+			case 'image/png':
+				if ( function_exists( 'imagecreatefrompng' ) ) {
+					$image = imagecreatefrompng( $file_path );
+					if ( $image ) {
+						imagealphablending( $image, false );
+						imagesavealpha( $image, true );
+					}
+				}
+				break;
+			case 'image/webp':
+				if ( function_exists( 'imagecreatefromwebp' ) ) {
+					$image = imagecreatefromwebp( $file_path );
+					if ( $image ) {
+						imagealphablending( $image, false );
+						imagesavealpha( $image, true );
+					}
+				}
+				break;
+			default:
+				return false;
+		}
+
+		// PHP 8+ compatibility check
+		if ( ! $image || ( ! is_resource( $image ) && ! is_object( $image ) ) ) {
+			return false;
+		}
+
+		return $image;
+	}
+
+	/**
+	 * Resize watermark proportionally
+	 *
+	 * @param resource|GdImage $watermark_image Watermark image resource.
+	 * @param int              $max_width Maximum width in pixels.
+	 * @param int              $target_width Target image width.
+	 * @param int              $target_height Target image height.
+	 * @return resource|GdImage Resized watermark image resource.
+	 */
+	private function resize_watermark( $watermark_image, $max_width, $target_width, $target_height ) {
+		$watermark_width = imagesx( $watermark_image );
+		$watermark_height = imagesy( $watermark_image );
+
+		// If watermark is already smaller than max width, no resize needed
+		if ( $watermark_width <= $max_width ) {
+			return $watermark_image;
+		}
+
+		// Calculate new dimensions proportionally
+		$ratio = $max_width / $watermark_width;
+		$new_width = (int) $max_width;
+		$new_height = (int) ( $watermark_height * $ratio );
+
+		// Ensure watermark doesn't exceed target image dimensions
+		if ( $new_width > $target_width || $new_height > $target_height ) {
+			$ratio = min( $target_width / $watermark_width, $target_height / $watermark_height );
+			$new_width = (int) ( $watermark_width * $ratio );
+			$new_height = (int) ( $watermark_height * $ratio );
+		}
+
+		// Create resized watermark
+		if ( function_exists( 'imagecreatetruecolor' ) ) {
+			$resized = imagecreatetruecolor( $new_width, $new_height );
+			if ( $resized ) {
+				imagealphablending( $resized, false );
+				imagesavealpha( $resized, true );
+
+				if ( function_exists( 'imagecopyresampled' ) ) {
+					imagecopyresampled( $resized, $watermark_image, 0, 0, 0, 0, $new_width, $new_height, $watermark_width, $watermark_height );
+				}
+			}
+		}
+
+		return isset( $resized ) && $resized ? $resized : $watermark_image;
+	}
+
+	/**
+	 * Calculate watermark position with padding
+	 *
+	 * @param int    $target_width Target image width.
+	 * @param int    $target_height Target image height.
+	 * @param int    $watermark_width Watermark width.
+	 * @param int    $watermark_height Watermark height.
+	 * @param string $position Position string.
+	 * @param int    $padding Minimum padding in pixels.
+	 * @return array Array with 'x' and 'y' coordinates.
+	 */
+	private function calculate_watermark_position( $target_width, $target_height, $watermark_width, $watermark_height, $position, $padding = 20 ) {
+		$x = 0;
+		$y = 0;
+
+		switch ( $position ) {
+			case 'top-left':
+				$x = $padding;
+				$y = $padding;
+				break;
+			case 'top-right':
+				$x = $target_width - $watermark_width - $padding;
+				$y = $padding;
+				break;
+			case 'bottom-left':
+				$x = $padding;
+				$y = $target_height - $watermark_height - $padding;
+				break;
+			case 'bottom-right':
+				$x = $target_width - $watermark_width - $padding;
+				$y = $target_height - $watermark_height - $padding;
+				break;
+			case 'center':
+				$x = ( $target_width - $watermark_width ) / 2;
+				$y = ( $target_height - $watermark_height ) / 2;
+				break;
+		}
+
+		// Ensure watermark stays within image bounds with padding
+		$x = max( $padding, min( $x, $target_width - $watermark_width - $padding ) );
+		$y = max( $padding, min( $y, $target_height - $watermark_height - $padding ) );
+
+		return array(
+			'x' => (int) $x,
+			'y' => (int) $y,
+		);
+	}
+
+	/**
+	 * Apply watermark with alpha transparency support
+	 *
+	 * @param resource|GdImage $target_image Target image resource.
+	 * @param resource|GdImage $watermark_image Watermark image resource.
+	 * @param int              $x X coordinate.
+	 * @param int              $y Y coordinate.
+	 * @return void
+	 */
+	private function apply_watermark_with_alpha( $target_image, $watermark_image, $x, $y ) {
+		$watermark_width = imagesx( $watermark_image );
+		$watermark_height = imagesy( $watermark_image );
+
+		// Preserve alpha channel on target image
+		imagealphablending( $target_image, true );
+		imagesavealpha( $target_image, true );
+
+		// Copy watermark onto target with alpha transparency
+		// imagecopy preserves alpha channel from PNG watermark images
+		if ( function_exists( 'imagecopy' ) ) {
+			imagecopy( $target_image, $watermark_image, $x, $y, 0, 0, $watermark_width, $watermark_height );
+		}
+	}
+
+	/**
+	 * Save image to file
+	 *
+	 * @param resource|GdImage $image Image resource.
+	 * @param string           $file_path Target file path.
+	 * @return bool True on success, false on failure.
+	 */
+	private function save_image( $image, $file_path ) {
+		if ( ! $image ) {
+			return false;
+		}
+
+		$file_type = wp_check_filetype( $file_path );
+		$mime_type = $file_type['type'];
+
+		$success = false;
+		switch ( $mime_type ) {
+			case 'image/jpeg':
+				if ( function_exists( 'imagejpeg' ) ) {
+					$success = imagejpeg( $image, $file_path, 90 );
+				}
+				break;
+			case 'image/png':
+				if ( function_exists( 'imagepng' ) ) {
+					imagealphablending( $image, false );
+					imagesavealpha( $image, true );
+					$success = imagepng( $image, $file_path, 9 );
+				}
+				break;
+			case 'image/webp':
+				if ( function_exists( 'imagewebp' ) ) {
+					$success = imagewebp( $image, $file_path, 85 );
+				}
+				break;
+		}
+
+		return $success;
+	}
+
+	/**
+	 * Validate watermark image
+	 *
+	 * @param int $attachment_id Watermark attachment ID.
+	 * @return bool True if valid, false otherwise.
+	 */
+	private function validate_watermark_image( $attachment_id ) {
+		if ( ! $attachment_id ) {
+			return false;
+		}
+
+		$file_path = get_attached_file( $attachment_id );
+		if ( ! $file_path || ! file_exists( $file_path ) ) {
+			return false;
+		}
+
+		// Check if it's a supported image format
+		$file_type = wp_check_filetype( $file_path );
+		$supported_types = array( 'image/jpeg', 'image/png', 'image/webp' );
+		
+		return in_array( $file_type['type'], $supported_types, true );
+	}
+
+	/**
+	 * Check if GD library is available
+	 *
+	 * @return bool
+	 */
+	private function is_gd_available() {
+		return function_exists( 'imagecreatefromjpeg' ) 
+			&& function_exists( 'imagecreatefrompng' ) 
+			&& function_exists( 'imagecopy' );
+	}
+
+	/**
+	 * Get feature description
+	 *
+	 * @return string
+	 */
+	public function get_description() {
+		return __( 'Apply watermarks to images in your media library. Select a watermark image, configure size and position, then choose target images. Watermarking only runs when explicitly triggered via the action button.', 'webp-media-handler' );
+	}
+}
