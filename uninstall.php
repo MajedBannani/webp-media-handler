@@ -40,6 +40,7 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 $plugin_options = array(
 	'wpmh_settings',      // Main plugin settings
 	'wpmh_action_logs',   // Action execution logs
+	'wpmh_replace_urls_last_run_summary', // Replace URLs feature (removed, but cleanup for existing installs)
 );
 
 // List of all transient keys used by the plugin
@@ -49,6 +50,9 @@ $plugin_transients = array(
 
 // Pattern for user-specific transients (watermark flash notices)
 $transient_pattern = 'wpmh_watermark_flash_%';
+
+// Pattern for replace URLs job state transients (removed feature, but cleanup for existing installs)
+$replace_urls_pattern = 'wpmh_replace_job_state_%';
 
 /**
  * Delete all transients matching a pattern
@@ -107,6 +111,13 @@ function wpmh_cleanup_site() {
 	// Delete user-specific watermark flash transients (pattern-based)
 	wpmh_delete_transients_by_pattern( $transient_pattern, false );
 	wpmh_delete_transients_by_pattern( $transient_pattern, true );
+
+	// Delete replace URLs job state transients (removed feature, cleanup for existing installs)
+	global $replace_urls_pattern;
+	if ( isset( $replace_urls_pattern ) ) {
+		wpmh_delete_transients_by_pattern( $replace_urls_pattern, false );
+		wpmh_delete_transients_by_pattern( $replace_urls_pattern, true );
+	}
 }
 
 // Cleanup for single site installation

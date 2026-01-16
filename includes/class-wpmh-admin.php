@@ -104,12 +104,10 @@ class WPMH_Admin {
 				'nonces'  => array(
 					'toggle'              => wp_create_nonce( 'wpmh_toggle_feature' ),
 					'convert_existing'    => wp_create_nonce( 'wpmh_convert_existing_webp' ),
-					'replace_urls'        => wp_create_nonce( 'wpmh_replace_image_urls' ),
 					'apply_watermark'     => wp_create_nonce( 'wpmh_apply_watermark' ),
 				),
 				'strings' => array(
 					'confirmConvert' => __( 'This will convert all existing JPEG/PNG images to WebP. This action cannot be undone automatically. Continue?', 'webp-media-handler' ),
-					'confirmReplace' => __( 'This will replace image URLs throughout your site. This action cannot be undone automatically. Continue?', 'webp-media-handler' ),
 					'confirmWatermark' => __( 'This will apply watermarks to selected images. This action will modify your images and cannot be undone automatically. Continue?', 'webp-media-handler' ),
 					'confirmWatermarkAll' => __( 'This will apply watermarks to ALL images in your media library. This action will modify your images and cannot be undone automatically. Are you sure you want to continue?', 'webp-media-handler' ),
 					'processing'     => __( 'Processing...', 'webp-media-handler' ),
@@ -188,14 +186,6 @@ class WPMH_Admin {
 					$this->features['convert_existing']->get_description(),
 					'wpmh_convert_existing_webp',
 					__( 'Convert Existing Images', 'webp-media-handler' )
-				); ?>
-
-				<?php $this->render_action_card(
-					'replace_urls',
-					__( 'Replace Existing Image URLs with WebP', 'webp-media-handler' ),
-					$this->features['replace_urls']->get_description(),
-					'wpmh_replace_image_urls',
-					__( 'Replace Image URLs', 'webp-media-handler' )
 				); ?>
 
 				<?php $this->render_watermark_card(); ?>
@@ -277,11 +267,6 @@ class WPMH_Admin {
 				        data-nonce-action="<?php echo esc_attr( $nonce_action ); ?>">
 					<?php echo esc_html( $button_text ); ?>
 				</button>
-				<?php if ( 'replace_urls' === $action_key ) : ?>
-					<a href="#" id="wpmh-reset-replace-job" class="button" style="display: none; margin-left: 10px;">
-						<?php esc_html_e( 'Reset Job', 'webp-media-handler' ); ?>
-					</a>
-				<?php endif; ?>
 				<div class="wpmh-action-status" id="wpmh-status-<?php echo esc_attr( $action_key ); ?>"></div>
 			</div>
 		</div>

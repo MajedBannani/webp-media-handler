@@ -33,17 +33,6 @@ When enabled:
 - Non-blocking to admin UI
 - **Cannot be undone automatically**
 
-### 4. Replace Existing Image URLs with WebP (Action Button)
-- One-time action triggered only by admin button
-- Replaces JPG/PNG URLs with .webp URLs in:
-  - `post_content` (all post types)
-  - `theme_mods` (IDs and URLs)
-  - `wp_options` (strings, arrays, serialized data)
-- Only replaces if WebP file exists
-- Never replaces external URLs
-- Handles serialized and JSON data safely
-- **Cannot be undone automatically**
-
 ## Design Principles
 
 - **No URL-based triggers** - All actions require explicit admin interaction

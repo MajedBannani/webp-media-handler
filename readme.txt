@@ -9,7 +9,7 @@ Stable tag: 1.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Disable image sizes, convert JPEG/PNG to WebP (new uploads or on-demand), and replace image URLs with WebP when files exist.
+Disable image sizes, convert JPEG/PNG to WebP (new uploads or on-demand), and apply watermarks to images.
 
 == Description ==
 
@@ -25,7 +25,6 @@ Some actions on this page modify existing media files or database content. As a 
 
 * **Convert Existing Media Library Images to WebP** - One-time action button to convert all existing JPEG/PNG attachments to WebP format. Replaces original files and updates attachment metadata. This action cannot be undone automatically.
 
-* **Replace Existing Image URLs with WebP** - One-time action button to replace JPG/PNG URLs with WebP URLs in post content, theme mods, and wp_options. Only replaces URLs if the corresponding WebP file exists. Never replaces external URLs. This action cannot be undone automatically.
 
 = Design Principles =
 
@@ -102,7 +101,6 @@ No. All image conversion is performed locally using PHP's GD library. No externa
 * Disable WordPress default image sizes feature
 * Auto convert newly uploaded images to WebP
 * Convert existing media library images to WebP
-* Replace existing image URLs with WebP
 
 == Upgrade Notice ==
 

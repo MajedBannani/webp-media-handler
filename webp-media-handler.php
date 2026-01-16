@@ -118,7 +118,6 @@ final class WebP_Media_Handler {
 		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-disable-image-sizes.php';
 		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-auto-webp-convert.php';
 		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-convert-existing-webp.php';
-		require_once WPMH_PLUGIN_DIR . 'includes/features/class-iow-replace-image-urls.php';
 		require_once WPMH_PLUGIN_DIR . 'includes/features/class-wpmh-image-watermark.php';
 
 		// Load GitHub updater only in admin area
@@ -134,7 +133,6 @@ final class WebP_Media_Handler {
 		$this->features['disable_image_sizes'] = new WPMH_Disable_Image_Sizes( $this->settings );
 		$this->features['auto_webp_convert']   = new WPMH_Auto_WebP_Convert( $this->settings );
 		$this->features['convert_existing']     = new WPMH_Convert_Existing_WebP( $this->settings );
-		$this->features['replace_urls']         = new WPMH_Replace_Image_URLs( $this->settings );
 		$this->features['image_watermark']      = new WPMH_Image_Watermark( $this->settings );
 	}
 

@@ -17,8 +17,6 @@
 	init: function() {
 		this.bindEvents();
 		this.initWatermarkToggle();
-		// Hide reset button initially
-		$('#wpmh-reset-replace-job').hide();
 	},
 
 	/**
@@ -61,9 +59,6 @@
 			// Save watermark settings when changed
 			// NEW DESIGN: Do not save watermark settings - they are runtime-only
 		// $(document).on('change', '.wpmh-watermark-size-select, .wpmh-watermark-position-select, input[name="wpmh-watermark-target-mode"]', this.saveWatermarkSettings);
-			
-			// Reset replace job button
-			$(document).on('click', '#wpmh-reset-replace-job', this.resetReplaceJob);
 		},
 
 		/**
@@ -143,8 +138,6 @@
 			var confirmMessage = '';
 			if (action === 'convert_existing') {
 				confirmMessage = wpmhAdmin.strings.confirmConvert;
-			} else if (action === 'replace_urls') {
-				confirmMessage = wpmhAdmin.strings.confirmReplace;
 			} else if (action === 'apply_watermark') {
 				// Validate watermark settings before confirmation
 				var watermarkId = $('#wpmh-watermark-image-id').val();
@@ -176,278 +169,13 @@
 			// Show processing status
 			$status.removeClass('success error').addClass('show info').text(wpmhAdmin.strings.processing);
 
-			// Handle URL replacement specially (uses new job-based system)
-			if (action === 'replace_urls') {
-				WPMHAdmin.startReplaceJob(action, nonceAction);
-			} else {
-				// Other actions use old system
-				var dryRun = false;
-				WPMHAdmin.processAction(action, nonceAction, 0, null, dryRun);
-			}
+			// Process action
+			var dryRun = false;
+			WPMHAdmin.processAction(action, nonceAction, 0, null, dryRun);
 		},
 
 		/**
-		 * Start replace URLs job (new job-based system)
-		 */
-		startReplaceJob: function(action, nonceAction) {
-			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
-			var statusId = '#wpmh-status-' + action;
-			var $status = $(statusId);
-
-		// Get nonce
-		var nonce = wpmhAdmin.nonces.replace_urls;
-
-			// Show reset button if hidden
-			$('#wpmh-reset-replace-job').show();
-
-			$.ajax({
-				url: wpmhAdmin.ajaxUrl,
-				type: 'POST',
-				data: {
-					action: 'wpmh_start_replace_job',
-					nonce: nonce
-				},
-				success: function(response) {
-					if (response.success) {
-						$status.removeClass('info error').addClass('show success').text(response.data.message);
-						// Start batch loop
-						setTimeout(function() {
-							WPMHAdmin.runReplaceBatch(action, nonceAction, 0);
-						}, 500);
-					} else {
-						$status.removeClass('info success').addClass('show error').text(response.data.message || wpmhAdmin.strings.error);
-						$button.prop('disabled', false);
-					}
-				},
-				error: function(xhr, status, error) {
-					WPMHAdmin.handleReplaceError($status, $button, error, 0);
-				}
-			});
-		},
-
-		/**
-		 * Run replace URLs batch (with retries)
-		 */
-		runReplaceBatch: function(action, nonceAction, retryCount) {
-			retryCount = retryCount || 0;
-			
-			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
-			var statusId = '#wpmh-status-' + action;
-			var $status = $(statusId);
-
-			// Max retries
-			if (retryCount >= 3) {
-				var errorMsg = wpmhAdmin.strings.error + ' Maximum retries reached. Please reset and try again.';
-				if ($status.data('last-error')) {
-					errorMsg = $status.data('last-error');
-				}
-				$status.removeClass('info success').addClass('show error').text(errorMsg);
-				$button.prop('disabled', false);
-				
-				// Show debug info if available
-				if ($status.data('last-debug')) {
-					WPMHAdmin.showDebugInfo($status, $status.data('last-debug'));
-				}
-				return;
-			}
-
-			var nonce = wpmhAdmin.nonces.replace_urls;
-
-			$.ajax({
-				url: wpmhAdmin.ajaxUrl,
-				type: 'POST',
-				data: {
-					action: 'wpmh_run_replace_batch',
-					nonce: nonce
-				},
-				timeout: 30000, // 30 second timeout
-				success: function(response) {
-					if (response.success) {
-						// Clear any stored error data
-						$status.removeData('last-error').removeData('last-debug');
-						
-						// Update status
-						var message = response.data.message;
-						if (response.data.processed !== undefined && response.data.total !== undefined) {
-							message += ' (' + response.data.processed + ' of ' + response.data.total + ')';
-						}
-						$status.removeClass('info error').addClass('show success').text(message);
-
-						// Check if should continue
-						if (response.data.continue !== false && response.data.stage !== 'complete') {
-							// Continue with next batch
-							setTimeout(function() {
-								WPMHAdmin.runReplaceBatch(action, nonceAction, 0); // Reset retry count on success
-							}, 500);
-						} else {
-							// Completed
-							$button.prop('disabled', false);
-							
-							// Show final stats
-							if (response.data.stats) {
-								var statsMsg = response.data.message;
-								if (response.data.stats.tables) {
-									var tableDetails = [];
-									for (var table in response.data.stats.tables) {
-										if (response.data.stats.tables.hasOwnProperty(table)) {
-											var t = response.data.stats.tables[table];
-											if (t.scanned > 0) {
-												tableDetails.push(table + ': ' + t.scanned + ' scanned, ' + t.updated + ' updated');
-											}
-										}
-									}
-									if (tableDetails.length > 0) {
-										statsMsg += '\n\n' + tableDetails.join('\n');
-									}
-								}
-								if (statsMsg.indexOf('\n') !== -1) {
-									$status.html(statsMsg.replace(/\n/g, '<br>'));
-								}
-							}
-						}
-					} else {
-						// Store error info for potential display
-						var errorMsg = response.data.message || wpmhAdmin.strings.error;
-						$status.data('last-error', errorMsg);
-						if (response.data.debug) {
-							$status.data('last-debug', response.data.debug);
-						}
-						
-						// Check if we should NOT retry (validation errors)
-						var noRetry = response.data.no_retry === true;
-						
-						if (noRetry) {
-							// Don't retry on validation errors - show error immediately
-							$status.removeClass('info success').addClass('show error').text(errorMsg);
-							$button.prop('disabled', false);
-							
-							// Show debug info if available
-							if (response.data.debug) {
-								WPMHAdmin.showDebugInfo($status, response.data.debug);
-							}
-							
-							// Special handling for permission/nonce errors
-							if (errorMsg.indexOf('permission') !== -1 || errorMsg.indexOf('nonce') !== -1 || errorMsg.indexOf('security') !== -1) {
-								errorMsg += ' Please refresh the page and try again.';
-								$status.text(errorMsg);
-							}
-						} else {
-							// Retry for transient errors
-							WPMHAdmin.handleReplaceError($status, $button, errorMsg, retryCount, action, nonceAction, response.data.debug);
-						}
-					}
-				},
-				error: function(xhr, status, error) {
-					var errorMsg = error || 'Network error';
-					$status.data('last-error', errorMsg);
-					
-					// Try to parse response for debug info
-					try {
-						var response = xhr.responseJSON;
-						if (response && response.data && response.data.debug) {
-							$status.data('last-debug', response.data.debug);
-						}
-					} catch(e) {
-						// Ignore parse errors
-					}
-					
-					WPMHAdmin.handleReplaceError($status, $button, errorMsg, retryCount, action, nonceAction);
-				}
-			});
-		},
-
-		/**
-		 * Handle replace job errors with retry (with exponential backoff)
-		 */
-		handleReplaceError: function($status, $button, error, retryCount, action, nonceAction, debugInfo) {
-			retryCount = retryCount || 0;
-			
-			// Calculate backoff delay: 500ms, 1500ms, 3000ms
-			var backoffDelays = [500, 1500, 3000];
-			var delay = backoffDelays[Math.min(retryCount, backoffDelays.length - 1)];
-			
-			if (retryCount < 3) {
-				// Retry with backoff
-				$status.removeClass('success').addClass('info').text(wpmhAdmin.strings.processing + ' (Retry ' + (retryCount + 1) + '/3)');
-				setTimeout(function() {
-					WPMHAdmin.runReplaceBatch(action, nonceAction, retryCount + 1);
-				}, delay);
-			} else {
-				// Max retries reached
-				var errorMsg = wpmhAdmin.strings.error + ': ' + error + ' Please reset and try again.';
-				$status.removeClass('info success').addClass('show error').text(errorMsg);
-				$button.prop('disabled', false);
-				
-				// Show debug info if available
-				if (debugInfo || $status.data('last-debug')) {
-					WPMHAdmin.showDebugInfo($status, debugInfo || $status.data('last-debug'));
-				}
-			}
-		},
-
-		/**
-		 * Show debug information in UI
-		 */
-		showDebugInfo: function($status, debugData) {
-			if (!$status.length || !debugData) {
-				return;
-			}
-			
-			// Remove existing debug details if any
-			$status.siblings('.wpmh-debug-info').remove();
-			
-			var debugHtml = '<details class="wpmh-debug-info" style="margin-top: 10px; padding: 10px; background: #f0f0f0; border: 1px solid #ccc; font-family: monospace; font-size: 11px;">';
-			debugHtml += '<summary style="cursor: pointer; font-weight: bold;">Debug Information (Click to expand)</summary>';
-			debugHtml += '<pre style="max-height: 400px; overflow: auto; margin-top: 10px;">';
-			debugHtml += JSON.stringify(debugData, null, 2);
-			debugHtml += '</pre>';
-			debugHtml += '</details>';
-			
-			$status.after(debugHtml);
-		},
-
-		/**
-		 * Reset replace job
-		 */
-		resetReplaceJob: function(e) {
-			e.preventDefault();
-
-			if (!confirm('Reset the current job? This will clear all progress.')) {
-				return;
-			}
-
-			var $button = $('.wpmh-action-button[data-action="replace_urls"]');
-			var statusId = '#wpmh-status-replace_urls';
-			var $status = $(statusId);
-			var $resetBtn = $('#wpmh-reset-replace-job');
-
-			var nonce = wpmhAdmin.nonces.replace_urls;
-
-			$.ajax({
-				url: wpmhAdmin.ajaxUrl,
-				type: 'POST',
-				data: {
-					action: 'wpmh_reset_replace_job',
-					nonce: nonce
-				},
-				success: function(response) {
-					if (response.success) {
-						$status.removeClass('success error info').text('');
-						$button.prop('disabled', false);
-						$resetBtn.hide();
-					} else {
-						alert(response.data.message || wpmhAdmin.strings.error);
-					}
-				},
-				error: function() {
-					alert(wpmhAdmin.strings.error);
-				}
-			});
-		},
-
-
-		/**
-		 * Process action (with batching) - OLD SYSTEM for other actions
+		 * Process action (with batching)
 		 */
 		processAction: function(action, nonceAction, offset, table, dryRun) {
 			var $button = $('.wpmh-action-button[data-action="' + action + '"]');
@@ -458,8 +186,6 @@
 			var nonce = '';
 			if (nonceAction === 'wpmh_convert_existing_webp') {
 				nonce = wpmhAdmin.nonces.convert_existing;
-			} else if (nonceAction === 'wpmh_replace_image_urls') {
-				nonce = wpmhAdmin.nonces.replace_urls;
 			} else if (nonceAction === 'wpmh_apply_watermark') {
 				nonce = wpmhAdmin.nonces.apply_watermark;
 			}
@@ -470,16 +196,6 @@
 				nonce: nonce,
 				offset: offset
 			};
-
-			// Add dry-run and table for URL replacement
-			if (nonceAction === 'wpmh_replace_image_urls') {
-				if (dryRun !== undefined && dryRun !== null) {
-					postData.dry_run = dryRun ? '1' : '0';
-				}
-				if (table) {
-					postData.table = table;
-				}
-			}
 
 			// Add watermark-specific data
 			if (nonceAction === 'wpmh_apply_watermark') {
@@ -505,10 +221,7 @@
 						// If not completed, continue processing
 						if (!response.data.completed) {
 							setTimeout(function() {
-								// Pass table and dry_run for URL replacement
-								var nextTable = response.data.table || table;
-								var nextDryRun = (dryRun !== undefined && dryRun !== null) ? dryRun : (response.data.dry_run !== undefined ? response.data.dry_run : false);
-								WPMHAdmin.processAction(action, nonceAction, response.data.offset, nextTable, nextDryRun);
+								WPMHAdmin.processAction(action, nonceAction, response.data.offset, table, dryRun);
 							}, 500);
 						} else {
 							// Re-enable button
