@@ -51,6 +51,40 @@ class WPMH_Admin {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
 		add_action( 'wp_ajax_wpmh_toggle_feature', array( $this, 'handle_toggle' ) );
 		add_action( 'wp_ajax_wpmh_save_watermark_settings', array( $this, 'handle_save_watermark_settings' ) );
+		add_action( 'admin_notices', array( $this, 'render_watermark_notice' ) );
+	}
+
+	/**
+	 * Render watermark notice from transient (Issue 2 fix)
+	 */
+	public function render_watermark_notice() {
+		// Only show on plugin settings page
+		$screen = get_current_screen();
+		if ( ! $screen || 'toplevel_page_webp-media-handler' !== $screen->id ) {
+			return;
+		}
+
+		$notice = get_transient( 'wpmh_watermark_notice' );
+		if ( ! $notice || ! is_array( $notice ) ) {
+			return;
+		}
+
+		// Delete transient after displaying
+		delete_transient( 'wpmh_watermark_notice' );
+
+		$type = isset( $notice['type'] ) ? $notice['type'] : 'success';
+		$message = isset( $notice['message'] ) ? $notice['message'] : '';
+
+		if ( empty( $message ) ) {
+			return;
+		}
+
+		$class = 'notice notice-' . esc_attr( $type ) . ' is-dismissible';
+		?>
+		<div class="<?php echo esc_attr( $class ); ?>">
+			<p><strong><?php echo esc_html( $message ); ?></strong></p>
+		</div>
+		<?php
 	}
 
 	/**

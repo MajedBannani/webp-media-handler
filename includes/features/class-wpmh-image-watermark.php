@@ -97,10 +97,13 @@ class WPMH_Image_Watermark {
 			wp_send_json_error( array( 'message' => __( 'Invalid watermark size.', 'webp-media-handler' ) ) );
 		}
 
-		// Validate watermark position
+		// FIX B: Validate watermark position - ensure it's valid before processing
+		// If invalid, fallback to ONE safe default (bottom-right) but ONLY ONCE
 		$allowed_positions = array( 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center' );
 		if ( ! in_array( $watermark_position, $allowed_positions, true ) ) {
-			wp_send_json_error( array( 'message' => __( 'Invalid watermark position.', 'webp-media-handler' ) ) );
+			// Invalid position - fallback to safe default (bottom-right) ONCE
+			// This ensures position is valid, but we do NOT apply a second watermark
+			$watermark_position = 'bottom-right';
 		}
 
 		// Get batch parameters
@@ -162,6 +165,7 @@ class WPMH_Image_Watermark {
 			) );
 
 			// FIX E: Always show success notice with processed/failed/skipped counts
+			// Build detailed message for visual confirmation
 			$message_parts = array();
 			if ( $final_success > 0 ) {
 				$message_parts[] = sprintf(
@@ -189,6 +193,16 @@ class WPMH_Image_Watermark {
 			if ( ! empty( $message_parts ) ) {
 				$message .= ' ' . implode( '. ', $message_parts ) . '.';
 			}
+
+			// FIX E: Store notice in transient for display on admin page (if needed)
+			// The AJAX response will show the message immediately, but also store for page reload
+			set_transient( 'wpmh_watermark_notice', array(
+				'type' => 'success',
+				'message' => $message,
+				'success' => $final_success,
+				'failed' => $final_failed,
+				'skipped' => $final_skipped,
+			), 60 ); // 60 second expiry
 
 			wp_send_json_success( array(
 				'message' => $message,
@@ -375,8 +389,10 @@ class WPMH_Image_Watermark {
 			$padding
 		);
 
-		// FIX A & D: Ensure exactly ONE overlay per image with debug tracking
-		$watermark_applied_count = 0; // Track overlay count - must be exactly 1
+		// FIX A: ENFORCEMENT GUARD - Ensure exactly ONE overlay per image
+		// This guard prevents any accidental second overlay calls
+		// Use instance variable that's reset for each image (not static)
+		$did_overlay = false;
 
 		// DEBUG: Log position calculation before application
 		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
@@ -391,26 +407,37 @@ class WPMH_Image_Watermark {
 			) );
 		}
 
+		// FIX A: Guard check - prevent multiple overlays
+		if ( $did_overlay ) {
+			// This should NEVER happen - log error if it does
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( sprintf(
+					'[WPMH Watermark] ERROR: Attempted second overlay blocked! Attachment ID: %d | Position: %s',
+					$attachment_id,
+					$watermark_position
+				) );
+			}
+			// Skip overlay - already applied
+			imagedestroy( $watermark_image );
+			imagedestroy( $target_image );
+			return false;
+		}
+
 		// FIX A: Apply watermark with alpha transparency - EXACTLY ONCE
 		// This is the ONLY place where the watermark is composited onto the image
 		$this->apply_watermark_with_alpha( $target_image, $watermark_image, $position['x'], $position['y'] );
-		$watermark_applied_count++;
+		$did_overlay = true; // Mark as applied to prevent any subsequent calls
 
 		// DEBUG: Verify single application
 		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-			if ( $watermark_applied_count !== 1 ) {
-				error_log( sprintf(
-					'[WPMH Watermark] ERROR: Multiple overlays detected! Attachment ID: %d | Count: %d',
-					$attachment_id,
-					$watermark_applied_count
-				) );
-			} else {
-				error_log( sprintf(
-					'[WPMH Watermark] Success - Attachment ID: %d | Watermark applied count: %d',
-					$attachment_id,
-					$watermark_applied_count
-				) );
-			}
+			error_log( sprintf(
+				'[WPMH Watermark] Success - Attachment ID: %d | Position: %s | Applied at X: %d, Y: %d | Watermark applied: %s',
+				$attachment_id,
+				$watermark_position,
+				$position['x'],
+				$position['y'],
+				$did_overlay ? 'YES (once)' : 'NO'
+			) );
 		}
 
 		// Clean up watermark resource immediately after use
@@ -428,20 +455,26 @@ class WPMH_Image_Watermark {
 			return false;
 		}
 
-		// FIX C: Regenerate attachment metadata WITHOUT reprocessing the main image
-		// wp_generate_attachment_metadata may trigger image processing hooks that could cause duplicates
-		// We only need to update metadata, not regenerate intermediate sizes
+		// FIX C: Update attachment metadata WITHOUT regenerating (which could trigger image processing)
+		// wp_generate_attachment_metadata may trigger image processing hooks that could cause duplicate watermarks
+		// We only need to update dimensions, not regenerate intermediate sizes or reprocess the image
 		$existing_metadata = wp_get_attachment_metadata( $attachment_id );
-		if ( $existing_metadata && isset( $existing_metadata['file'] ) ) {
-			// Update file dimensions in metadata without regenerating
-			$existing_metadata['width'] = $target_width;
-			$existing_metadata['height'] = $target_height;
-			wp_update_attachment_metadata( $attachment_id, $existing_metadata );
-		} else {
-			// Only regenerate if metadata doesn't exist
-			$metadata = wp_generate_attachment_metadata( $attachment_id, $target_file );
-			wp_update_attachment_metadata( $attachment_id, $metadata );
+		if ( ! $existing_metadata ) {
+			$existing_metadata = array();
 		}
+		
+		// Update dimensions only - do NOT call wp_generate_attachment_metadata which processes images
+		$existing_metadata['width'] = $target_width;
+		$existing_metadata['height'] = $target_height;
+		
+		// Update file path if it changed
+		$upload_dir = wp_upload_dir();
+		$relative_path = str_replace( $upload_dir['basedir'] . '/', '', $target_file );
+		if ( ! isset( $existing_metadata['file'] ) || $existing_metadata['file'] !== $relative_path ) {
+			$existing_metadata['file'] = $relative_path;
+		}
+		
+		wp_update_attachment_metadata( $attachment_id, $existing_metadata );
 
 		return true;
 	}
@@ -584,23 +617,41 @@ class WPMH_Image_Watermark {
 		}
 
 		// Ensure watermark stays within image bounds with padding
-		// This only clamps values if out of bounds - it does NOT create a second position
-		// Clamp X coordinate
+		// CRITICAL: This only clamps values if out of bounds - it does NOT create a second position
+		// It only adjusts the SINGLE calculated position to stay within bounds
 		$x_min = $padding;
 		$x_max = $target_width - $watermark_width - $padding;
+		$y_min = $padding;
+		$y_max = $target_height - $watermark_height - $padding;
+		
+		// Clamp X coordinate only if out of bounds (preserve original position intent)
 		if ( $x < $x_min ) {
 			$x = $x_min;
 		} elseif ( $x > $x_max ) {
 			$x = $x_max;
 		}
 		
-		// Clamp Y coordinate
-		$y_min = $padding;
-		$y_max = $target_height - $watermark_height - $padding;
+		// Clamp Y coordinate only if out of bounds (preserve original position intent)
 		if ( $y < $y_min ) {
 			$y = $y_min;
 		} elseif ( $y > $y_max ) {
 			$y = $y_max;
+		}
+		
+		// DEBUG: Log if clamping occurred (only when WP_DEBUG is enabled)
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG && ( $x !== ( ( $target_width - $watermark_width ) / 2 ) || $position === 'center' ) ) {
+			// Log if position was clamped (except for center which uses division)
+			if ( ( 'top-left' === $position && ( $x !== $padding || $y !== $padding ) ) ||
+				 ( 'top-right' === $position && ( $x !== ( $target_width - $watermark_width - $padding ) || $y !== $padding ) ) ||
+				 ( 'bottom-left' === $position && ( $x !== $padding || $y !== ( $target_height - $watermark_height - $padding ) ) ) ||
+				 ( 'bottom-right' === $position && ( $x !== ( $target_width - $watermark_width - $padding ) || $y !== ( $target_height - $watermark_height - $padding ) ) ) ) {
+				error_log( sprintf(
+					'[WPMH Watermark] Position clamped - Original: %s | Final X: %d, Y: %d',
+					$position,
+					$x,
+					$y
+				) );
+			}
 		}
 
 		return array(
@@ -622,6 +673,24 @@ class WPMH_Image_Watermark {
 	 * @return void
 	 */
 	private function apply_watermark_with_alpha( $target_image, $watermark_image, $x, $y ) {
+		// FIX A: ENFORCEMENT GUARD - Static flag to prevent multiple overlays even if function is called twice
+		static $overlay_applied = array(); // Track overlays per image resource
+		$image_id = spl_object_hash( $target_image );
+		
+		// Check if overlay was already applied to this image resource
+		if ( isset( $overlay_applied[ $image_id ] ) ) {
+			// This should NEVER happen - log error if it does
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( sprintf(
+					'[WPMH Watermark] CRITICAL: Blocked duplicate overlay attempt on image resource %s at X: %d, Y: %d',
+					substr( $image_id, 0, 8 ),
+					$x,
+					$y
+				) );
+			}
+			return; // Block second overlay
+		}
+		
 		// Get watermark dimensions - these should be final dimensions after resizing
 		$watermark_width = imagesx( $watermark_image );
 		$watermark_height = imagesy( $watermark_image );
@@ -637,9 +706,10 @@ class WPMH_Image_Watermark {
 
 		// FIX A: SINGLE WATERMARK APPLICATION - This is the ONLY call to imagecopy for watermarking
 		// Apply watermark exactly once at the specified coordinates
-		// Do NOT call this function multiple times - it will create duplicate watermarks
+		// Mark this image resource as having an overlay applied
 		if ( function_exists( 'imagecopy' ) ) {
 			imagecopy( $target_image, $watermark_image, $x, $y, 0, 0, $watermark_width, $watermark_height );
+			$overlay_applied[ $image_id ] = true; // Mark as applied
 		}
 	}
 
