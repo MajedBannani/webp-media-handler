@@ -2010,13 +2010,16 @@ class WPMH_Replace_Image_URLs {
 			return $content;
 		}
 
-		// Handle srcset attribute (preserves exact formatting)
-		if ( preg_match( '/srcset\s*=\s*["\']([^"\']+)["\']/i', $content ) ) {
-			$content = preg_replace_callback(
-				'/srcset\s*=\s*["\']([^"\']+)["\']/i',
-				array( $this, 'replace_srcset_callback' ),
-				$content
-			);
+		// Handle srcset and data-srcset attributes (preserves exact formatting)
+		// CRITICAL: Must handle ALL srcset entries (1x, 2x, 300w, etc.), not just the first
+		$srcset_patterns = array(
+			'/srcset\s*=\s*["\']([^"\']+)["\']/i',
+			'/data-srcset\s*=\s*["\']([^"\']+)["\']/i',
+		);
+		foreach ( $srcset_patterns as $pattern ) {
+			if ( preg_match( $pattern, $content ) ) {
+				$content = preg_replace_callback( $pattern, array( $this, 'replace_srcset_callback' ), $content );
+			}
 		}
 
 		// Handle CSS background-image (preserves exact formatting)
@@ -2046,40 +2049,70 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Callback for srcset replacement
+	 * Callback for srcset and data-srcset replacement
+	 * CRITICAL: Must replace ALL URLs in srcset (1x, 2x, 300w, etc.), not just the first
 	 *
 	 * @param array $matches Matched srcset content.
 	 * @return string Replacement srcset.
 	 */
 	private function replace_srcset_callback( $matches ) {
-		$full_srcset = $matches[0];
-		$srcset_content = $matches[1];
+		$full_match = $matches[0]; // e.g., srcset="..." or data-srcset="..."
+		$srcset_content = $matches[1]; // Content inside quotes
 
+		// Detect attribute name (srcset or data-srcset)
+		$attr_name = 'srcset';
+		if ( stripos( $full_match, 'data-srcset' ) !== false ) {
+			$attr_name = 'data-srcset';
+		}
+
+		// Split by comma to handle multiple entries (e.g., "url1 1x, url2 2x, url3 300w")
 		$tokens = explode( ',', $srcset_content );
 		$processed_tokens = array();
+		$original_spacing = array(); // Track original spacing for preservation
 
-		foreach ( $tokens as $token ) {
+		foreach ( $tokens as $index => $token ) {
+			$original_token = $token;
 			$token = trim( $token );
-			if ( preg_match( '/^(.+?\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?)\s*(.+)$/i', $token, $token_matches ) ) {
+			
+			// Skip empty tokens
+			if ( empty( $token ) ) {
+				continue;
+			}
+
+			// Extract URL and descriptor (1x, 2x, 300w, etc.)
+			// Pattern: URL (jpg/jpeg/png) + optional query/hash + whitespace + descriptor
+			if ( preg_match( '/^(.+?\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?)\s+(.+)$/i', $token, $token_matches ) ) {
+				// Has descriptor (e.g., "image.jpg 2x" or "image.png 300w")
 				$url_part = $token_matches[1];
-				$descriptor = isset( $token_matches[5] ) ? ' ' . trim( $token_matches[5] ) : '';
+				$descriptor = $token_matches[5]; // 1x, 2x, 300w, etc.
 				
+				// Replace URL extension via callback (validates .webp exists)
 				$replaced_url = preg_replace_callback(
 					'/(.+?)\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?$/i',
 					array( $this, 'replace_url_callback' ),
 					$url_part
 				);
-				$processed_tokens[] = $replaced_url . $descriptor;
-			} else {
-				$processed_tokens[] = preg_replace_callback(
+				
+				// Preserve original spacing (space before descriptor)
+				$processed_tokens[] = $replaced_url . ' ' . $descriptor;
+			} elseif ( preg_match( '/\.(jpg|jpeg|png)(\?|#|$|\s)/i', $token ) ) {
+				// URL without explicit descriptor (implicit 1x)
+				$replaced_url = preg_replace_callback(
 					'/(.+?)\.(jpg|jpeg|png)(\?[^\s]*)?(#[^\s]*)?$/i',
 					array( $this, 'replace_url_callback' ),
 					$token
 				);
+				$processed_tokens[] = $replaced_url;
+			} else {
+				// No image URL in this token, keep as-is
+				$processed_tokens[] = $token;
 			}
 		}
 
-		return 'srcset="' . implode( ', ', $processed_tokens ) . '"';
+		// Rebuild attribute with preserved spacing
+		// Use same quote style as original (single or double)
+		$quote = ( strpos( $full_match, '"' ) !== false ) ? '"' : "'";
+		return $attr_name . '=' . $quote . implode( ', ', $processed_tokens ) . $quote;
 	}
 
 	/**

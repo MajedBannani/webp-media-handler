@@ -238,23 +238,27 @@ class WPMH_Convert_Existing_WebP {
 
 		$webp_path = $result['webp_path'];
 
-		// CRITICAL: Validate WebP file before deleting original
+		// CRITICAL: Validate WebP file before any destructive operations
+		// Note: Validation already happened in convert_to_webp() before atomic rename,
+		// but double-check here as fail-safe
 		$validation = $this->validate_webp_file( $webp_path );
 		if ( ! $validation['valid'] ) {
-			// Delete bad WebP file, keep original intact
+			// Delete bad WebP file (fail-safe check), keep original intact
 			if ( file_exists( $webp_path ) ) {
 				wp_delete_file( $webp_path );
 			}
 			return array(
 				'success' => false,
-				'error' => $validation['error'],
+				'error' => $validation['error'] . ' (fail-safe validation failed)',
 			);
 		}
 
-		// Only now delete original file (after WebP is validated)
-		if ( file_exists( $file_path ) ) {
-			wp_delete_file( $file_path );
-		}
+		// CRITICAL: Do NOT delete original by default - keep both files
+		// Users can manually clean up originals if desired
+		// Only delete original if explicitly configured to do so (future enhancement)
+		// if ( file_exists( $file_path ) && apply_filters( 'wpmh_delete_original_after_conversion', false ) ) {
+		//     wp_delete_file( $file_path );
+		// }
 
 		// Update attachment metadata
 		$attachment_data = array(
@@ -278,8 +282,9 @@ class WPMH_Convert_Existing_WebP {
 	}
 
 	/**
-	 * Convert image to WebP format
+	 * Convert image to WebP format using atomic temp file approach
 	 * Uses WP_Image_Editor as primary method, falls back to GD if needed
+	 * CRITICAL: Writes to temp file first, validates, then atomically renames
 	 *
 	 * @param string $file_path Original file path.
 	 * @param string $mime_type Original MIME type.
@@ -292,19 +297,52 @@ class WPMH_Convert_Existing_WebP {
 
 		// Generate WebP file path
 		$webp_path = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $file_path );
+		
+		// Use temp file for atomic operation (target.webp.tmp)
+		$temp_path = $webp_path . '.tmp';
 
 		// Try WP_Image_Editor first (preferred method)
 		$editor = wp_get_image_editor( $file_path );
 		if ( ! is_wp_error( $editor ) ) {
-			$saved = $editor->save( $webp_path, 'image/webp' );
+			$saved = $editor->save( $temp_path, 'image/webp' );
 			
 			if ( ! is_wp_error( $saved ) && isset( $saved['path'] ) ) {
-				// WP_Image_Editor may return a different path, use it if provided
-				$actual_path = $saved['path'];
+				// WP_Image_Editor may return a different path (normalized), use it
+				$actual_temp_path = $saved['path'];
 				
-				// Basic validation (full validation happens after)
-				if ( file_exists( $actual_path ) ) {
-					return array( 'webp_path' => $actual_path );
+				// If WP_Image_Editor saved to a different path, use that as our temp
+				// (This can happen if WP normalizes the path)
+				$temp_to_validate = ( $actual_temp_path !== $temp_path && file_exists( $actual_temp_path ) ) 
+					? $actual_temp_path 
+					: $temp_path;
+				
+				// CRITICAL: Validate temp file before atomic rename
+				$validation = $this->validate_webp_file( $temp_to_validate );
+				if ( $validation['valid'] ) {
+					// If temp path differs, first move to our standard temp path
+					if ( $temp_to_validate !== $temp_path ) {
+						if ( ! @rename( $temp_to_validate, $temp_path ) ) {
+							// Move failed - clean up
+							@unlink( $temp_to_validate );
+							return array( 'error' => __( 'Failed to move WebP file to temp path.', 'webp-media-handler' ) );
+						}
+					}
+					
+					// Atomic rename: temp -> final
+					if ( @rename( $temp_path, $webp_path ) ) {
+						return array( 'webp_path' => $webp_path );
+					} else {
+						// Rename failed - clean up temp
+						@unlink( $temp_path );
+						return array( 'error' => __( 'Failed to rename temp WebP file to final path.', 'webp-media-handler' ) );
+					}
+				} else {
+					// Validation failed - clean up temp file(s)
+					@unlink( $temp_to_validate );
+					if ( $temp_to_validate !== $temp_path && file_exists( $temp_path ) ) {
+						@unlink( $temp_path );
+					}
+					return array( 'error' => $validation['error'] );
 				}
 			}
 			
@@ -312,18 +350,23 @@ class WPMH_Convert_Existing_WebP {
 		}
 
 		// Fallback to GD library
-		return $this->convert_to_webp_gd( $file_path, $mime_type, $webp_path );
+		return $this->convert_to_webp_gd( $file_path, $mime_type, $webp_path, $temp_path );
 	}
 
 	/**
 	 * Convert image to WebP using GD library (fallback method)
+	 * CRITICAL: Writes to temp file first, validates, then atomically renames
 	 *
 	 * @param string $file_path Original file path.
 	 * @param string $mime_type Original MIME type.
 	 * @param string $webp_path Target WebP file path.
+	 * @param string $temp_path Temp file path (defaults to webp_path.tmp if not provided).
 	 * @return array Result array with 'webp_path' on success or 'error' on failure.
 	 */
-	private function convert_to_webp_gd( $file_path, $mime_type, $webp_path ) {
+	private function convert_to_webp_gd( $file_path, $mime_type, $webp_path, $temp_path = null ) {
+		if ( $temp_path === null ) {
+			$temp_path = $webp_path . '.tmp';
+		}
 		// Check GD WebP support
 		if ( ! function_exists( 'imagewebp' ) ) {
 			return array( 'error' => __( 'GD library WebP support not available.', 'webp-media-handler' ) );
@@ -350,7 +393,11 @@ class WPMH_Convert_Existing_WebP {
 				if ( ! $image ) {
 					return array( 'error' => __( 'Failed to load PNG image.', 'webp-media-handler' ) );
 				}
-				// Preserve transparency for PNG
+				// CRITICAL: Preserve PNG transparency correctly
+				// Convert palette images to true color for proper alpha support
+				if ( imageistruecolor( $image ) === false ) {
+					imagepalettetotruecolor( $image );
+				}
 				imagealphablending( $image, false );
 				imagesavealpha( $image, true );
 				break;
@@ -364,20 +411,40 @@ class WPMH_Convert_Existing_WebP {
 			return array( 'error' => __( 'Failed to create image resource.', 'webp-media-handler' ) );
 		}
 
-		// Convert to WebP with quality 85
+		// Convert to WebP with quality 85 - write to TEMP file first
 		$quality = 85;
-		$success = @imagewebp( $image, $webp_path, $quality );
+		$success = @imagewebp( $image, $temp_path, $quality );
 
 		// Free memory immediately
 		imagedestroy( $image );
 
+		// CRITICAL: Check return value and file existence
 		if ( ! $success ) {
-			return array( 'error' => __( 'Failed to write WebP file.', 'webp-media-handler' ) );
+			// Clean up any partial temp file
+			if ( file_exists( $temp_path ) ) {
+				@unlink( $temp_path );
+			}
+			return array( 'error' => __( 'Failed to write WebP file (imagewebp returned false).', 'webp-media-handler' ) );
 		}
 
-		// Basic file existence check (full validation happens after)
-		if ( ! file_exists( $webp_path ) ) {
-			return array( 'error' => __( 'WebP file was not created.', 'webp-media-handler' ) );
+		// Verify temp file was created
+		if ( ! file_exists( $temp_path ) ) {
+			return array( 'error' => __( 'WebP temp file was not created.', 'webp-media-handler' ) );
+		}
+
+		// CRITICAL: Validate temp file before atomic rename
+		$validation = $this->validate_webp_file( $temp_path );
+		if ( ! $validation['valid'] ) {
+			// Validation failed - delete temp file, keep original intact
+			@unlink( $temp_path );
+			return array( 'error' => $validation['error'] );
+		}
+
+		// Atomic rename: temp -> final WebP path
+		if ( ! @rename( $temp_path, $webp_path ) ) {
+			// Rename failed - clean up temp
+			@unlink( $temp_path );
+			return array( 'error' => __( 'Failed to rename temp WebP file to final path.', 'webp-media-handler' ) );
 		}
 
 		return array( 'webp_path' => $webp_path );
