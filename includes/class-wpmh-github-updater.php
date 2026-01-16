@@ -105,11 +105,14 @@ class WPMH_GitHub_Updater {
 			return $transient;
 		}
 
-		// Extract version from tag (remove leading 'v' if present)
+		// Normalize both versions for accurate comparison
+		// GitHub tags include leading 'v' (e.g. v1.0.12), installed version does not
 		$latest_version = $this->normalize_version( $release_data->tag_name );
+		$current_version = $this->normalize_version( $this->current_version );
 
-		// Compare versions
-		if ( version_compare( $this->current_version, $latest_version, '<' ) ) {
+		// Only show update if latest version is actually newer (not equal)
+		// version_compare returns -1 if current < latest, 0 if equal, 1 if current > latest
+		if ( version_compare( $current_version, $latest_version, '<' ) ) {
 			// Prepare update data
 			if ( ! isset( $transient->response ) ) {
 				$transient->response = array();
@@ -330,26 +333,58 @@ class WPMH_GitHub_Updater {
 	}
 
 	/**
-	 * Normalize version string by removing leading 'v' if present
+	 * Normalize version string by removing leading 'v' and trimming whitespace
+	 *
+	 * Ensures accurate version comparison by normalizing GitHub tags (e.g. "v1.0.12")
+	 * to match installed version format (e.g. "1.0.12").
 	 *
 	 * @param string $version Version string.
 	 * @return string Normalized version string.
 	 */
 	private function normalize_version( $version ) {
-		return ltrim( $version, 'v' );
+		// Trim whitespace first, then remove leading 'v' (case-insensitive)
+		$version = trim( $version );
+		$version = ltrim( $version, 'vV' );
+		return trim( $version );
 	}
 
 	/**
 	 * Clear transient cache after plugin update
 	 *
+	 * Clears both the GitHub release data cache and WordPress update transient
+	 * to ensure update notifications disappear after successful update.
+	 *
 	 * @param WP_Upgrader $upgrader WP_Upgrader instance.
 	 * @param array       $options  Array of bulk item update data.
 	 */
 	public function clear_transient_cache( $upgrader, $options ) {
-		if ( 'update' === $options['action'] && 'plugin' === $options['type'] ) {
-			if ( isset( $options['plugins'] ) && in_array( $this->plugin_basename, $options['plugins'], true ) ) {
-				delete_transient( $this->transient_name );
+		// Only process plugin updates
+		if ( 'update' !== $options['action'] || 'plugin' !== $options['type'] ) {
+			return;
+		}
+
+		// Check if this plugin was updated
+		$plugin_updated = false;
+		
+		// Single plugin update
+		if ( isset( $options['plugin'] ) && $options['plugin'] === $this->plugin_basename ) {
+			$plugin_updated = true;
+		}
+		
+		// Bulk plugin update
+		if ( isset( $options['plugins'] ) && is_array( $options['plugins'] ) ) {
+			if ( in_array( $this->plugin_basename, $options['plugins'], true ) ) {
+				$plugin_updated = true;
 			}
+		}
+
+		if ( $plugin_updated ) {
+			// Clear GitHub release data cache
+			delete_transient( $this->transient_name );
+			
+			// Clear WordPress update transient to remove update notifications
+			// This ensures WordPress re-checks for updates on next page load
+			delete_site_transient( 'update_plugins' );
 		}
 	}
 }
