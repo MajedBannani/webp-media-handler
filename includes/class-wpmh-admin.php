@@ -284,6 +284,73 @@ class WPMH_Admin {
 	}
 
 	/**
+	 * Get and clear watermark flash message (single consumption)
+	 * Ensures the flash message is read and deleted in one atomic operation
+	 *
+	 * @return array|null Flash message data or null if not found/already consumed.
+	 */
+	private function get_and_clear_watermark_flash() {
+		// Static guard: ensure we only consume the flash once per request
+		static $flash_consumed = false;
+		if ( $flash_consumed ) {
+			return null; // Already consumed in this request
+		}
+
+		// Only read flash message if this is NOT an AJAX request
+		if ( defined( 'DOING_AJAX' ) && DOING_AJAX ) {
+			return null;
+		}
+
+		$current_user_id = get_current_user_id();
+		$transient_key = 'wpmh_watermark_flash_' . $current_user_id;
+		
+		// Read and delete in one operation
+		$flash = get_transient( $transient_key );
+		if ( $flash !== false && is_array( $flash ) ) {
+			// Delete immediately after reading (single consumption)
+			delete_transient( $transient_key );
+			$flash_consumed = true;
+			return $flash;
+		}
+
+		return null;
+	}
+
+	/**
+	 * Render watermark inline notice once (with static guard)
+	 * Prevents duplicate rendering even if called multiple times
+	 *
+	 * @param array $flash Flash message data.
+	 * @return void
+	 */
+	private function render_watermark_inline_notice_once( $flash ) {
+		// Static guard: ensure we only render once per request
+		static $did_render = false;
+		if ( $did_render ) {
+			return; // Already rendered in this request
+		}
+
+		if ( empty( $flash ) || ! is_array( $flash ) || ! isset( $flash['message'] ) ) {
+			// Render empty container
+			echo '<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice" style="display: none;"></div>';
+			$did_render = true;
+			return;
+		}
+
+		$type = isset( $flash['type'] ) ? $flash['type'] : 'success';
+		$message = $flash['message'];
+
+		// Render notice
+		printf(
+			'<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice wpmh-inline-notice-%s">%s</div>',
+			esc_attr( $type ),
+			esc_html( $message )
+		);
+
+		$did_render = true;
+	}
+
+	/**
 	 * Render watermark feature card
 	 */
 	private function render_watermark_card() {
@@ -300,22 +367,8 @@ class WPMH_Admin {
 		$log = $this->settings->get_action_log( 'apply_watermark' );
 		$last_run = $log ? $log['timestamp'] : '';
 
-		// E: Read flash message (counts only, no watermark data)
-		// FIX: Only render flash message on fresh page load (not during AJAX)
-		// Flash message is set after watermark completion, then consumed here on next page render
-		$current_user_id = get_current_user_id();
-		$flash_notice = null;
-		
-		// Only read flash message if this is NOT an AJAX request
-		if ( ! defined( 'DOING_AJAX' ) || ! DOING_AJAX ) {
-			$flash_notice = get_transient( 'wpmh_watermark_flash_' . $current_user_id );
-			if ( $flash_notice && is_array( $flash_notice ) ) {
-				// Consume the flash message (read once, then delete)
-				delete_transient( 'wpmh_watermark_flash_' . $current_user_id );
-			} else {
-				$flash_notice = null;
-			}
-		}
+		// SINGLE CONSUMPTION: Get flash message (reads and deletes in one operation)
+		$flash_notice = $this->get_and_clear_watermark_flash();
 		?>
 		<div class="wpmh-feature-card wpmh-watermark-card">
 			<div class="wpmh-feature-header">
@@ -439,15 +492,9 @@ class WPMH_Admin {
 					</button>
 					<div class="wpmh-action-status" id="wpmh-status-apply_watermark"></div>
 					<?php 
-					// FIX: Only render flash message if it exists AND we're not in AJAX context
-					// JavaScript will show immediate feedback, PHP flash is fallback for page reloads
-					if ( ! empty( $flash_notice ) && isset( $flash_notice['message'] ) && ( ! defined( 'DOING_AJAX' ) || ! DOING_AJAX ) ) : ?>
-						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice wpmh-inline-notice-<?php echo esc_attr( isset( $flash_notice['type'] ) ? $flash_notice['type'] : 'success' ); ?>">
-							<?php echo esc_html( $flash_notice['message'] ); ?>
-						</div>
-					<?php else : ?>
-						<div id="wpmh-watermark-inline-notice" class="wpmh-inline-notice" style="display: none;"></div>
-					<?php endif; ?>
+					// SINGLE CONSUMPTION: Render inline notice once (with static guard to prevent duplicates)
+					$this->render_watermark_inline_notice_once( $flash_notice );
+					?>
 				</div>
 			</div>
 		</div>

@@ -230,35 +230,15 @@
 							// Re-enable button
 							$button.prop('disabled', false);
 							
-							// FIX: For watermark action, show inline notice via JS (immediate feedback)
-							// Flash message is set server-side, but we show it immediately via JS
-							// On page reload, PHP flash will be consumed, but we prevent duplicate by:
-							// 1. Only showing JS notice if inline container is empty (hasn't been shown yet)
-							// 2. PHP flash only renders on fresh page load (not during AJAX)
-							if (action === 'apply_watermark') {
-								var $inlineNotice = $('#wpmh-watermark-inline-notice');
-								// Only inject if container is empty/hidden (not already showing message)
-								if (!$inlineNotice.is(':visible') || !$inlineNotice.text().trim()) {
-									$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
-										.addClass('wpmh-inline-notice-success')
-										.text(response.data.message)
-										.show();
-								}
-							}
+							// SINGLE CONSUMPTION: Do NOT inject notice via JS
+							// The flash message is set server-side and will be rendered on next page load
+							// This prevents duplicate notices (JS injection + PHP flash message)
+							// Status div shows immediate feedback, flash message shows on reload
 						}
 					} else {
 						$status.removeClass('info success').addClass('show error').text(response.data.message || wpmhAdmin.strings.error);
 						
-						// Show error in inline notice for watermark action (only if container is empty)
-						if (action === 'apply_watermark') {
-							var $inlineNotice = $('#wpmh-watermark-inline-notice');
-							if (!$inlineNotice.is(':visible') || !$inlineNotice.text().trim()) {
-								$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
-									.addClass('wpmh-inline-notice-error')
-									.text(response.data.message || wpmhAdmin.strings.error)
-									.show();
-							}
-						}
+						// SINGLE CONSUMPTION: Errors shown in status div only (no inline notice for errors)
 						
 						$button.prop('disabled', false);
 					}
@@ -266,16 +246,7 @@
 				error: function() {
 					$status.removeClass('info success').addClass('show error').text(wpmhAdmin.strings.error);
 					
-					// Show error in inline notice for watermark action (only if container is empty)
-					if (action === 'apply_watermark') {
-						var $inlineNotice = $('#wpmh-watermark-inline-notice');
-						if (!$inlineNotice.is(':visible') || !$inlineNotice.text().trim()) {
-							$inlineNotice.removeClass('wpmh-inline-notice-success wpmh-inline-notice-error wpmh-inline-notice-warning')
-								.addClass('wpmh-inline-notice-error')
-								.text(wpmhAdmin.strings.error)
-								.show();
-						}
-					}
+					// SINGLE CONSUMPTION: Errors shown in status div only (no inline notice for errors)
 					
 					$button.prop('disabled', false);
 				}
