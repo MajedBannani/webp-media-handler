@@ -99,6 +99,38 @@ class WPMH_Image_Watermark {
 			wp_send_json_error( array( 'message' => __( 'Please select a watermark image.', 'webp-media-handler' ) ) );
 		}
 		
+		// STEP 1: Get watermark file using original_image meta fallback (STEP 3)
+		$watermark_file = $this->get_watermark_file_path( $watermark_id );
+		if ( ! $watermark_file || ! file_exists( $watermark_file ) ) {
+			wp_send_json_error( array( 'message' => __( 'Watermark image file not found.', 'webp-media-handler' ) ) );
+		}
+		
+		$watermark_realpath = realpath( $watermark_file );
+		
+		// STEP 1: Debug logs at start of Apply Watermark
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			$watermark_url = wp_get_attachment_image_url( $watermark_id, 'full' );
+			$watermark_meta = wp_get_attachment_metadata( $watermark_id );
+			$watermark_hash = md5_file( $watermark_file );
+			$watermark_dimensions = '';
+			if ( isset( $watermark_meta['width'] ) && isset( $watermark_meta['height'] ) ) {
+				$watermark_dimensions = $watermark_meta['width'] . 'x' . $watermark_meta['height'];
+			}
+			
+			error_log( sprintf(
+				'[WMH] START Apply Watermark - WM id=%d | WM URL=%s | WM file=%s | WM realpath=%s | WM dimensions=%s | WM hash=%s',
+				$watermark_id,
+				$watermark_url ? $watermark_url : 'N/A',
+				$watermark_file,
+				$watermark_realpath ? $watermark_realpath : 'N/A',
+				$watermark_dimensions ? $watermark_dimensions : 'N/A',
+				$watermark_hash
+			) );
+		}
+		
+		// STEP 5: Store initial watermark hash to detect contamination
+		$watermark_initial_hash = md5_file( $watermark_file );
+		
 		$watermark_size = isset( $_POST['watermark_size'] ) ? absint( wp_unslash( $_POST['watermark_size'] ) ) : 100;
 		$watermark_position = isset( $_POST['watermark_position'] ) ? sanitize_text_field( wp_unslash( $_POST['watermark_position'] ) ) : 'bottom-right';
 		$target_mode = isset( $_POST['target_mode'] ) ? sanitize_text_field( wp_unslash( $_POST['target_mode'] ) ) : 'selected';
@@ -279,12 +311,11 @@ class WPMH_Image_Watermark {
 		$batch_failed = 0;
 		$batch_skipped = 0;
 
-		// FIX 2: Get watermark file path for realpath comparison
-		$watermark_file_path = get_attached_file( $watermark_id );
-		$watermark_realpath = $watermark_file_path ? realpath( $watermark_file_path ) : false;
+		// STEP 2: Get watermark realpath for comparison (already computed above)
+		// Use the watermark_file path from get_watermark_file_path()
 
 		foreach ( $images as $attachment_id ) {
-			// FIX 2: Realpath comparison guard - prevent watermarking the watermark file itself
+			// STEP 2: Realpath comparison guard - prevent watermarking the watermark file itself
 			$target_file_path = get_attached_file( $attachment_id );
 			$target_realpath = $target_file_path ? realpath( $target_file_path ) : false;
 			
@@ -293,18 +324,33 @@ class WPMH_Image_Watermark {
 				$batch_skipped++;
 				if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
 					error_log( sprintf(
-						'[WPMH Watermark] SKIPPED: Attachment ID %d is the watermark source file (%s)',
+						'[WMH] SKIPPED: Attachment ID %d is the watermark source file (realpath match: %s)',
 						$attachment_id,
-						$target_file_path
+						$target_realpath
 					) );
 				}
 				continue;
 			}
 			
-			if ( $this->apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position ) ) {
+			if ( $this->apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position, $watermark_file, $watermark_realpath, $watermark_initial_hash ) ) {
 				$batch_success++;
 			} else {
 				$batch_failed++;
+			}
+		}
+		
+		// STEP 5: Verify watermark file hash hasn't changed (detect contamination)
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			$watermark_final_hash = md5_file( $watermark_file );
+			if ( $watermark_initial_hash !== $watermark_final_hash ) {
+				error_log( sprintf(
+					'[WMH] CRITICAL ERROR: Watermark file hash changed during run! Initial=%s | Final=%s | File=%s',
+					$watermark_initial_hash,
+					$watermark_final_hash,
+					$watermark_file
+				) );
+				// Abort further processing
+				wp_send_json_error( array( 'message' => __( 'Watermark file was modified during processing. Aborted for safety.', 'webp-media-handler' ) ) );
 			}
 		}
 
@@ -426,29 +472,41 @@ class WPMH_Image_Watermark {
 	 * @param int    $watermark_id  Watermark attachment ID.
 	 * @param int    $watermark_size Maximum width of watermark in pixels.
 	 * @param string $watermark_position Position of watermark.
+	 * @param string $watermark_file Watermark file path (pre-resolved with original_image fallback).
+	 * @param string $watermark_realpath Watermark realpath for comparison.
+	 * @param string $watermark_initial_hash Initial watermark file hash for contamination detection.
 	 * @return bool True on success, false on failure.
 	 */
-	private function apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position ) {
-		// FIX C: Apply watermark ONLY to the main attached file - DO NOT touch intermediate sizes
-		// Get ONLY the main file path (not intermediate sizes like thumbnails/medium/large)
+	private function apply_watermark_to_image( $attachment_id, $watermark_id, $watermark_size, $watermark_position, $watermark_file, $watermark_realpath, $watermark_initial_hash ) {
+		// STEP 2: Get target file - DO NOT touch intermediate sizes
 		$target_file = get_attached_file( $attachment_id );
 		if ( ! $target_file || ! file_exists( $target_file ) ) {
 			return false;
 		}
-
-		// Get watermark image file
-		$watermark_file = get_attached_file( $watermark_id );
-		if ( ! $watermark_file || ! file_exists( $watermark_file ) ) {
+		
+		$target_realpath = realpath( $target_file );
+		
+		// STEP 2: Double-check we're not watermarking the watermark file
+		if ( $watermark_realpath && $target_realpath && $watermark_realpath === $target_realpath ) {
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( sprintf(
+					'[WMH] ABORT: Target file equals watermark file (realpath: %s)',
+					$target_realpath
+				) );
+			}
 			return false;
 		}
 
-		// DEBUG: Log file path to confirm we're only processing main file
+		// STEP 1: Debug logs per image
+		$target_hash_before = '';
 		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			$target_hash_before = md5_file( $target_file );
 			error_log( sprintf(
-				'[WPMH Watermark] Starting - Attachment ID: %d | File: %s | Position: %s',
+				'[WMH] TARGET id=%d | file=%s | realpath=%s | hash_before=%s',
 				$attachment_id,
 				$target_file,
-				$watermark_position
+				$target_realpath ? $target_realpath : 'N/A',
+				$target_hash_before
 			) );
 		}
 
@@ -544,11 +602,32 @@ class WPMH_Image_Watermark {
 			) );
 		}
 
-		// Clean up watermark resource immediately after use
+		// Clean up watermark resource immediately after use (STEP 4: Never save resized watermark to disk)
 		imagedestroy( $watermark_image );
 		$watermark_image = null; // Prevent accidental reuse
 
-		// Save watermarked image
+		// STEP 4: CRITICAL - Verify we are NOT writing to the watermark file
+		if ( $watermark_realpath && $target_realpath && $watermark_realpath === $target_realpath ) {
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( sprintf(
+					'[WMH] CRITICAL ABORT: Attempted to write to watermark file! Target=%s | Watermark=%s',
+					$target_realpath,
+					$watermark_realpath
+				) );
+			}
+			imagedestroy( $target_image );
+			return false;
+		}
+
+		// STEP 1: Log output path before saving
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			error_log( sprintf(
+				'[WMH] Saving to OUTPUT path: %s (NOT watermark file)',
+				$target_file
+			) );
+		}
+
+		// Save watermarked image (STEP 4: Only target file, never watermark file)
 		$success = $this->save_image( $target_image, $target_file );
 
 		// Clean up target resource
@@ -557,6 +636,17 @@ class WPMH_Image_Watermark {
 
 		if ( ! $success ) {
 			return false;
+		}
+		
+		// STEP 1: Log hash after save
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			$target_hash_after = md5_file( $target_file );
+			error_log( sprintf(
+				'[WMH] TARGET id=%d | hash_after=%s | changed=%s',
+				$attachment_id,
+				$target_hash_after,
+				$target_hash_before !== $target_hash_after ? 'YES' : 'NO'
+			) );
 		}
 
 		// FIX C: Update attachment metadata WITHOUT regenerating (which could trigger image processing)
@@ -824,6 +914,14 @@ class WPMH_Image_Watermark {
 	 * @param string           $file_path Target file path.
 	 * @return bool True on success, false on failure.
 	 */
+	/**
+	 * Save image to file
+	 * STEP 4: This function must NEVER write to the watermark source file
+	 *
+	 * @param resource|GdImage $image Image resource.
+	 * @param string           $file_path File path to save to.
+	 * @return bool True on success, false on failure.
+	 */
 	private function save_image( $image, $file_path ) {
 		if ( ! $image ) {
 			return false;
@@ -854,6 +952,44 @@ class WPMH_Image_Watermark {
 		}
 
 		return $success;
+	}
+	
+	/**
+	 * Get watermark file path with original_image meta fallback (STEP 3 & STEP 5)
+	 * Ensures we use the true original file, not a scaled derivative
+	 *
+	 * @param int $watermark_id Watermark attachment ID.
+	 * @return string|false Watermark file path or false if not found.
+	 */
+	private function get_watermark_file_path( $watermark_id ) {
+		// STEP 3: Get base file path from attachment ID
+		$watermark_file = get_attached_file( $watermark_id );
+		if ( ! $watermark_file || ! file_exists( $watermark_file ) ) {
+			return false;
+		}
+		
+		// STEP 5: Check for original_image meta (WordPress stores original for scaled images)
+		$meta = wp_get_attachment_metadata( $watermark_id );
+		if ( ! empty( $meta['original_image'] ) ) {
+			$upload_dir = wp_upload_dir();
+			$base_dir = isset( $meta['file'] ) ? dirname( $meta['file'] ) : '';
+			if ( $base_dir ) {
+				$original_path = path_join( $upload_dir['basedir'], path_join( $base_dir, $meta['original_image'] ) );
+				if ( file_exists( $original_path ) ) {
+					if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+						error_log( sprintf(
+							'[WMH] Using original_image meta for watermark: %s (instead of scaled: %s)',
+							$original_path,
+							$watermark_file
+						) );
+					}
+					return $original_path;
+				}
+			}
+		}
+		
+		// Use the base file if no original_image meta
+		return $watermark_file;
 	}
 
 	/**
