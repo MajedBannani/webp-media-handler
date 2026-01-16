@@ -81,7 +81,7 @@ class WPMH_GitHub_Updater {
 	 * @return object|false Modified transient object or false.
 	 */
 	public function check_for_update( $transient ) {
-		// REQUIREMENT 1: MUST immediately return if not object or checked is empty
+		// FIX A1 & B1: MUST immediately return if not object or checked is empty
 		if ( ! is_object( $transient ) ) {
 			return $transient;
 		}
@@ -92,6 +92,19 @@ class WPMH_GitHub_Updater {
 
 		// Only run in admin area
 		if ( ! is_admin() ) {
+			return $transient;
+		}
+
+		// FIX A2: Ensure we have the correct plugin basename key
+		// The plugin_basename must match exactly what WordPress uses (e.g., 'webp-media-handler/webp-media-handler.php')
+		if ( ! isset( $transient->checked[ $this->plugin_basename ] ) ) {
+			// Plugin not in checked array - skip
+			return $transient;
+		}
+
+		// FIX B2: Get LOCAL version from WordPress checked array, not our stored value
+		$local_version = $transient->checked[ $this->plugin_basename ] ?? '';
+		if ( empty( $local_version ) ) {
 			return $transient;
 		}
 
@@ -109,24 +122,28 @@ class WPMH_GitHub_Updater {
 			return $transient;
 		}
 
-		// REQUIREMENT 2: Normalize versions FIRST, before ANY logic
+		// FIX B3: Normalize versions FIRST, before ANY logic
 		$remote_version = ltrim( trim( $release_data->tag_name ), 'v' );
-		$local_version  = trim( $this->current_version );
+		$local_version  = trim( $local_version );
 
-		// REQUIREMENT 3: HARD STOP CONDITION - If remote <= local, return immediately
+		// FIX C1: HARD STOP CONDITION - If remote <= local, return immediately
 		if ( version_compare( $remote_version, $local_version, '<=' ) ) {
+			// Ensure any previous injected entry is removed
+			if ( isset( $transient->response ) && is_array( $transient->response ) ) {
+				unset( $transient->response[ $this->plugin_basename ] );
+			}
 			// DO NOT create update object
-			// DO NOT touch $transient->response
 			// RETURN $transient immediately
 			return $transient;
 		}
 
-		// REQUIREMENT 4: Only if remote_version > local_version
-		// Build update object
+		// FIX C2: ONLY if remote_version > local_version - Build update object
+		// FIX E: Do not initialize response array unless needed
 		if ( ! isset( $transient->response ) ) {
 			$transient->response = array();
 		}
 
+		// FIX A3: Use correct plugin basename key
 		$transient->response[ $this->plugin_basename ] = (object) array(
 			'slug'        => dirname( $this->plugin_basename ),
 			'plugin'      => $this->plugin_basename,
