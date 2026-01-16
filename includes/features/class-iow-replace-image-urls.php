@@ -1101,19 +1101,36 @@ class WPMH_Replace_Image_URLs {
 			}
 
 			$has_changes = false;
+			$original_mods_serialized = $mod_option->option_value; // Store original for diff check
 			$new_mods = $this->process_theme_mods_array( $theme_mods, $has_changes, $replacements, $mod_option->option_name, $state );
 
 			if ( $has_changes ) {
+				// CRITICAL: Diff-based safety check for theme_mods
+				// Serialize the new mods to compare with original serialized format
+				$new_mods_serialized = maybe_serialize( $new_mods );
+				$diff_result = $this->validate_replacement_diff( $original_mods_serialized, $new_mods_serialized, $mod_option->option_name, 'theme_mods' );
+				
+				if ( ! $diff_result['safe'] ) {
+					// Unsafe change detected - log and skip
+					$this->write_debug_log( array(
+						'error_type' => 'UnsafeThemeModsReplacement',
+						'table' => 'theme_mods',
+						'option_name' => $mod_option->option_name,
+						'reason' => $diff_result['reason'],
+						'diff_summary' => $diff_result['summary'],
+					) );
+					continue; // Skip this theme_mods option
+				}
+
 				if ( ! $dry_run ) {
 					// Extract theme name from option_name (theme_mods_{theme_name})
 					$theme_name = str_replace( 'theme_mods_', '', $mod_option->option_name );
 					$current_theme = get_option( 'stylesheet' );
 					
-					// Snippet uses get_theme_mods() which only gets active theme mods
-					// For active theme, use set_theme_mod() for each changed key (like snippet)
+					// For active theme, use set_theme_mod() for each changed key only
 					// For other themes, update the option directly
 					if ( $theme_name === $current_theme ) {
-						// Active theme - use set_theme_mod() like snippet
+						// Active theme - update only changed keys individually
 						foreach ( $new_mods as $key => $new_value ) {
 							if ( ! isset( $theme_mods[ $key ] ) || $theme_mods[ $key ] !== $new_value ) {
 								set_theme_mod( $key, $new_value );
@@ -1293,8 +1310,25 @@ class WPMH_Replace_Image_URLs {
 				}
 
 				$original_value = $value;
-				$new_value = $this->replace_urls_in_value( $value );
+				$new_value = $this->replace_urls_in_value( $value, $state );
+				
 				if ( $new_value !== $original_value ) {
+					// CRITICAL: Diff-based safety check for theme_mod string values
+					$diff_result = $this->validate_replacement_diff( $original_value, $new_value, $key, 'theme_mods' );
+					
+					if ( ! $diff_result['safe'] ) {
+						// Unsafe change - skip this key
+						$this->write_debug_log( array(
+							'error_type' => 'UnsafeThemeModStringReplacement',
+							'option_name' => $theme_mod_option_name,
+							'mod_key' => $key,
+							'reason' => $diff_result['reason'],
+							'diff_summary' => $diff_result['summary'],
+						) );
+						$processed[ $key ] = $value; // Keep original
+						continue;
+					}
+
 					$processed[ $key ] = $new_value;
 					$has_changes = true;
 					$replacements += $this->count_replacements( $original_value, $new_value );
@@ -1311,7 +1345,9 @@ class WPMH_Replace_Image_URLs {
 						'replacements' => $this->count_replacements( $original_value, $new_value ),
 					);
 					$this->add_audit_entry( $audit_entry );
-					$state['audit_log'][] = $audit_entry;
+					if ( is_array( $state ) && isset( $state['audit_log'] ) ) {
+						$state['audit_log'][] = $audit_entry;
+					}
 				} else {
 					$processed[ $key ] = $value;
 				}
@@ -1403,6 +1439,22 @@ class WPMH_Replace_Image_URLs {
 			$new_value = $this->replace_urls_in_value( $original_value, $state );
 			
 			if ( $new_value !== $original_value ) {
+				// CRITICAL: Diff-based safety check - ensure ONLY URL extensions changed
+				$diff_result = $this->validate_replacement_diff( $original_value, $new_value, $row->meta_key, 'options' );
+				
+				if ( ! $diff_result['safe'] ) {
+					// Unsafe change detected - log and skip
+					$this->write_debug_log( array(
+						'error_type' => 'UnsafeReplacement',
+						'table' => 'options',
+						'option_name' => $row->meta_key,
+						'reason' => $diff_result['reason'],
+						'diff_summary' => $diff_result['summary'],
+					) );
+					$state['last_id'] = $row->meta_id;
+					continue; // Skip this option
+				}
+
 				// Audit log
 				$audit_entry = array(
 					'table' => 'options',
@@ -1788,13 +1840,60 @@ class WPMH_Replace_Image_URLs {
 		}
 
 		foreach ( $rows as $row ) {
-			$new_value = $this->replace_urls_in_value( $row->meta_value, $state );
-			if ( $new_value !== $row->meta_value ) {
+			// Check if this meta key should be skipped (builder JSON protection)
+			if ( $this->should_skip_string_replacement( $row->meta_key, $row->meta_value, $table_name ) ) {
+				$state['last_id'] = $row->meta_id;
+				continue;
+			}
+
+			$original_value = $row->meta_value;
+			$new_value = $this->replace_urls_in_value( $original_value, $state );
+			
+			if ( $new_value !== $original_value ) {
+				// CRITICAL: Diff-based safety check for meta values
+				$diff_result = $this->validate_replacement_diff( $original_value, $new_value, $row->meta_key, $table_name );
+				
+				if ( ! $diff_result['safe'] ) {
+					// Unsafe change detected - log and skip
+					$this->write_debug_log( array(
+						'error_type' => 'UnsafeMetaReplacement',
+						'table' => $table_name,
+						'meta_key' => $row->meta_key,
+						'reason' => $diff_result['reason'],
+						'diff_summary' => $diff_result['summary'],
+					) );
+					$state['last_id'] = $row->meta_id;
+					continue; // Skip this meta entry
+				}
+
+				// Audit log
+				$audit_entry = array(
+					'table' => $table_name,
+					'meta_key' => $row->meta_key,
+					'primary_key' => $row->meta_id,
+					'column' => 'meta_value',
+					'before' => $this->truncate_for_log( $original_value ),
+					'after' => $this->truncate_for_log( $new_value ),
+					'replacements' => $this->count_replacements( $original_value, $new_value ),
+				);
+				
+				// Add context-specific fields
+				if ( 'postmeta' === $table_name ) {
+					$audit_entry['post_id'] = $row->post_id;
+				} elseif ( 'usermeta' === $table_name ) {
+					$audit_entry['user_id'] = $row->post_id;
+				} elseif ( 'termmeta' === $table_name ) {
+					$audit_entry['term_id'] = $row->post_id;
+				}
+
+				$this->add_audit_entry( $audit_entry );
+				$state['audit_log'][] = $audit_entry;
+
 				if ( ! $dry_run ) {
 					call_user_func( $update_func, $row->$id_field, $row->meta_key, $new_value );
 				}
 				$rows_updated++;
-				$replacements += $this->count_replacements( $row->meta_value, $new_value );
+				$replacements += $this->count_replacements( $original_value, $new_value );
 			}
 
 			$state['last_id'] = $row->meta_id;
@@ -1824,7 +1923,8 @@ class WPMH_Replace_Image_URLs {
 
 	/**
 	 * Replace URLs in any value type (string, serialized, JSON)
-	 * Enhanced with builder JSON protection to prevent corruption
+	 * CRITICAL: Uses string-level replacement to preserve exact formatting/escaping
+	 * Root cause fix: Previous decode/encode approach changed JSON escaping and serialized structure
 	 *
 	 * @param mixed $value Value to process.
 	 * @param array $state Job state (for sample collection).
@@ -1835,32 +1935,12 @@ class WPMH_Replace_Image_URLs {
 			return $value;
 		}
 
-		// Handle strings (check for serialized/JSON first)
+		// Handle strings - use string-level replacement to preserve formatting
 		if ( is_string( $value ) ) {
-			// Check if string is serialized data
-			$unserialized = maybe_unserialize( $value );
-			if ( $unserialized !== $value && ( is_array( $unserialized ) || is_object( $unserialized ) ) ) {
-				// Value was serialized - process and re-serialize
-				// Root cause: Serialized PHP data must be unserialized, processed recursively, then re-serialized
-				// to avoid breaking serialized string length markers
-				$processed = $this->replace_urls_recursive( $unserialized, $state );
-				return maybe_serialize( $processed );
-			}
-
-			// Check if string is JSON data
-			// Root cause: Builder JSON (Bricks/Elementor) was being corrupted by direct string replacement
-			// URLs inside JSON were replaced, breaking JSON structure, escaping, or replacing IDs that must remain numeric
-			if ( $this->is_json( $value ) ) {
-				$decoded = json_decode( $value, true );
-				if ( json_last_error() === JSON_ERROR_NONE && ( is_array( $decoded ) || is_object( $decoded ) ) ) {
-					// Value was JSON - process and re-encode
-					// Only replace URLs in string fields, preserve numeric IDs
-					$processed = $this->replace_urls_recursive( $decoded, $state );
-					return wp_json_encode( $processed, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
-				}
-			}
-
-			// Plain string - process directly
+			// Use string-level replacement for ALL strings (JSON, serialized, plain)
+			// This preserves exact escaping, whitespace, and structure
+			// Root cause: json_decode/json_encode changed escaping (e.g., \/ to /) and formatting
+			// Root cause: maybe_unserialize/maybe_serialize changed structure
 			return $this->replace_urls_in_string( $value, $state );
 		}
 
@@ -1918,7 +1998,8 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Replace URLs in a string
+	 * Replace URLs in a string using strict pattern matching
+	 * CRITICAL: Only replaces full image URLs, preserves all other characters/formatting
 	 *
 	 * @param string $content Content to process.
 	 * @param array  $state Job state (for sample collection).
@@ -1929,7 +2010,7 @@ class WPMH_Replace_Image_URLs {
 			return $content;
 		}
 
-		// Handle srcset attribute
+		// Handle srcset attribute (preserves exact formatting)
 		if ( preg_match( '/srcset\s*=\s*["\']([^"\']+)["\']/i', $content ) ) {
 			$content = preg_replace_callback(
 				'/srcset\s*=\s*["\']([^"\']+)["\']/i',
@@ -1938,18 +2019,23 @@ class WPMH_Replace_Image_URLs {
 			);
 		}
 
-		// Handle CSS background-image
+		// Handle CSS background-image (preserves exact formatting)
 		$content = preg_replace_callback(
 			'/background-image\s*:\s*url\s*\(\s*["\']?([^"\'()]+)["\']?\s*\)/i',
 			array( $this, 'replace_css_url_callback' ),
 			$content
 		);
 
-		// Main URL patterns - matches snippet pattern: /(https?:\/\/[^\s"\')]+?\.(jpg|jpeg|png))/i
-		// Extended to handle relative URLs and preserve query strings/hashes
+		// Main URL patterns - STRICT matching for full image URLs only
+		// Pattern ensures URL ends with .jpg/.jpeg/.png and includes query/hash if present
+		// Matches: http(s)://domain/path/image.jpg?query#hash
+		// Matches: /wp-content/uploads/image.png?query#hash
+		// Does NOT match: partial strings, non-URLs, external domains (validated in callback)
 		$patterns = array(
-			'/(https?:\/\/[^\s"\'<>\[\]{}()]+?\.(jpg|jpeg|png))/i',
-			'/(\/[^\s"\'<>\[\]{}()]+?\.(jpg|jpeg|png))/i',
+			// Full HTTP(S) URLs ending with image extension
+			'/(https?:\/\/[^\s"\'<>\[\]{}()]+?\.(jpg|jpeg|png)(?:\?[^\s"\'<>\[\]{}()]*)?(?:#[^\s"\'<>\[\]{}()]*)?)/i',
+			// Site-relative paths starting with /wp-content/uploads/ ending with image extension
+			'/(\/wp-content\/uploads\/[^\s"\'<>\[\]{}()]+?\.(jpg|jpeg|png)(?:\?[^\s"\'<>\[\]{}()]*)?(?:#[^\s"\'<>\[\]{}()]*)?)/i',
 		);
 
 		foreach ( $patterns as $pattern ) {
@@ -2016,16 +2102,22 @@ class WPMH_Replace_Image_URLs {
 	}
 
 	/**
-	 * Callback for URL replacement (matches snippet behavior)
+	 * Callback for URL replacement with strict validation
+	 * CRITICAL: Only replaces if .webp file exists and URL is local
 	 *
 	 * @param array $matches Matched URL parts.
-	 * @return string Replacement URL or original if WebP doesn't exist.
+	 * @return string Replacement URL or original if validation fails.
 	 */
 	private function replace_url_callback( $matches ) {
-		$original_url = $matches[0]; // Full matched URL
+		$original_url = $matches[0]; // Full matched URL (including query/hash if present)
 
 		// Skip if already .webp
 		if ( preg_match( '/\.webp($|[?#])/i', $original_url ) ) {
+			return $original_url;
+		}
+
+		// Skip data URIs
+		if ( strpos( $original_url, 'data:image' ) === 0 ) {
 			return $original_url;
 		}
 
@@ -2034,53 +2126,84 @@ class WPMH_Replace_Image_URLs {
 		$site_url = site_url();
 		$cdn_base_url = apply_filters( 'wpmh_cdn_base_url', '' );
 
-		// Check if URL belongs to this site (like snippet - only checks upload_dir baseurl)
-		// Snippet only processes URLs from upload_dir, but we extend to home_url/site_url for completeness
+		// STRICT: Check if URL belongs to this site's uploads directory ONLY
+		// Only process URLs from upload_dir baseurl to avoid replacing external/CDN URLs
 		$upload_baseurl_lower = strtolower( $upload_dir['baseurl'] );
-		$home_url_lower = strtolower( $home_url );
-		$site_url_lower = strtolower( $site_url );
 		$original_url_lower = strtolower( $original_url );
 		
-		$is_upload_url = strpos( $original_url_lower, $upload_baseurl_lower ) !== false;
-		$is_home_url = strpos( $original_url_lower, $home_url_lower ) !== false;
-		$is_site_url = strpos( $original_url_lower, $site_url_lower ) !== false;
-		$is_cdn_url = ! empty( $cdn_base_url ) && strpos( $original_url_lower, strtolower( $cdn_base_url ) ) !== false;
+		// Check if URL is from uploads directory (primary check)
+		$is_upload_url = ( strpos( $original_url_lower, $upload_baseurl_lower ) === 0 ) || 
+		                 ( strpos( $original_url, '/wp-content/uploads/' ) !== false );
 		
-		// Snippet only processes upload URLs, but requirements say to also check home_url/site_url
-		if ( ! $is_upload_url && ! $is_home_url && ! $is_site_url && ! $is_cdn_url ) {
+		// Also allow CDN if configured
+		$is_cdn_url = false;
+		if ( ! empty( $cdn_base_url ) ) {
+			$cdn_baseurl_lower = strtolower( $cdn_base_url );
+			$is_cdn_url = strpos( $original_url_lower, $cdn_baseurl_lower ) === 0;
+		}
+		
+		// Skip if not local uploads URL or configured CDN
+		if ( ! $is_upload_url && ! $is_cdn_url ) {
 			return $original_url; // External URL, skip
 		}
 
-		// Convert URL to file path (like snippet)
-		$file_path = '';
-		if ( $is_upload_url ) {
-			$file_path = str_replace( $upload_dir['baseurl'], $upload_dir['basedir'], $original_url );
-		} elseif ( $is_cdn_url ) {
-			$file_path = str_replace( $cdn_base_url, $upload_dir['basedir'], $original_url );
-		} elseif ( $is_home_url || $is_site_url ) {
-			$relative_path = str_replace( array( $home_url, $site_url ), '', $original_url );
-			$file_path = ABSPATH . ltrim( $relative_path, '/' );
+		// Extract base URL without query/hash for path conversion
+		$base_url = $original_url;
+		$query_string = '';
+		$fragment = '';
+		
+		// Preserve query string and fragment
+		if ( preg_match( '/^([^?#]+)(\?[^#]*)?(#.*)?$/i', $original_url, $url_parts ) ) {
+			$base_url = $url_parts[1];
+			$query_string = isset( $url_parts[2] ) ? $url_parts[2] : '';
+			$fragment = isset( $url_parts[3] ) ? $url_parts[3] : '';
 		}
 
-		// Remove query string and fragment from path
-		$path_parts = explode( '?', $file_path, 2 );
-		$file_path = $path_parts[0];
-		$path_parts = explode( '#', $file_path, 2 );
-		$file_path = $path_parts[0];
+		// Convert URL to local file path
+		$file_path = '';
+		if ( $is_upload_url ) {
+			// Handle full uploads URL
+			if ( strpos( $base_url, $upload_dir['baseurl'] ) === 0 ) {
+				$file_path = str_replace( $upload_dir['baseurl'], $upload_dir['basedir'], $base_url );
+			} elseif ( strpos( $base_url, '/wp-content/uploads/' ) !== false ) {
+				// Handle site-relative path
+				$relative_path = preg_replace( '#^.*?/wp-content/uploads/#', '', $base_url );
+				$file_path = $upload_dir['basedir'] . '/' . ltrim( $relative_path, '/' );
+			}
+		} elseif ( $is_cdn_url ) {
+			$file_path = str_replace( $cdn_base_url, $upload_dir['basedir'], $base_url );
+		}
+
+		if ( empty( $file_path ) ) {
+			return $original_url; // Could not determine file path
+		}
 
 		// Normalize path separators
 		$file_path = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $file_path );
 
-		// Check if WebP version exists (like snippet)
-		$webp_path = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $file_path );
-		if ( ! file_exists( $webp_path ) ) {
-			return $original_url;
+		// CRITICAL: Verify source image exists
+		if ( ! file_exists( $file_path ) || ! is_file( $file_path ) ) {
+			return $original_url; // Source file doesn't exist
 		}
 
-		// Replace extension in URL (preserving query string/hash like snippet)
-		$webp_url = preg_replace( '/\.(jpg|jpeg|png)(\?|#|$)/i', '.webp$2', $original_url );
+		// Generate WebP file path
+		$webp_path = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $file_path );
 		
-		return $webp_url;
+		// CRITICAL: Verify WebP file exists and is not empty
+		if ( ! file_exists( $webp_path ) || ! is_file( $webp_path ) ) {
+			return $original_url; // WebP doesn't exist
+		}
+
+		// Verify WebP file is not empty (0 bytes)
+		$webp_size = @filesize( $webp_path );
+		if ( $webp_size === false || $webp_size <= 0 ) {
+			return $original_url; // WebP file is empty or invalid
+		}
+
+		// Replace extension in base URL only, preserving query/hash
+		$webp_base_url = preg_replace( '/\.(jpg|jpeg|png)$/i', '.webp', $base_url );
+		
+		return $webp_base_url . $query_string . $fragment;
 	}
 
 	/**
@@ -2364,6 +2487,103 @@ class WPMH_Replace_Image_URLs {
 			'log' => $log_data,
 			'summary' => isset( $log_data['summary'] ) ? $log_data['summary'] : array(),
 		) );
+	}
+
+	/**
+	 * Validate that replacement only changed URL extensions (fail-safe diff check)
+	 * CRITICAL: Ensures we don't corrupt data structures by changing anything other than .jpg/.jpeg/.png -> .webp
+	 *
+	 * @param string $original Original value.
+	 * @param string $new New value.
+	 * @param string $key Key name (option_name, meta_key, etc.).
+	 * @param string $context Context (options, theme_mods, etc.).
+	 * @return array Result with 'safe' bool and optional 'reason'/'summary'.
+	 */
+	private function validate_replacement_diff( $original, $new, $key, $context ) {
+		// If values are identical, always safe
+		if ( $original === $new ) {
+			return array( 'safe' => true );
+		}
+
+		// Normalize both to strings for comparison
+		$orig_str = is_string( $original ) ? $original : (string) $original;
+		$new_str = is_string( $new ) ? $new : (string) $new;
+
+		// Check 1: Length should not change drastically (allowing for .jpg->.webp length difference)
+		// .jpg/.jpeg/.png -> .webp changes: .jpg (4) -> .webp (5) = +1, .jpeg (5) -> .webp (5) = 0, .png (4) -> .webp (5) = +1
+		$length_diff = strlen( $new_str ) - strlen( $orig_str );
+		if ( abs( $length_diff ) > strlen( $orig_str ) * 0.1 ) {
+			// More than 10% length change suggests structure corruption
+			return array(
+				'safe' => false,
+				'reason' => sprintf( 'Length change too large: %d bytes (%.1f%%)', $length_diff, ( $length_diff / strlen( $orig_str ) ) * 100 ),
+				'summary' => 'Length validation failed',
+			);
+		}
+
+		// Check 2: Count occurrences of image extensions
+		// Should have fewer .jpg/.jpeg/.png and more .webp
+		$orig_img_count = 0;
+		preg_match_all( '/\.(jpg|jpeg|png)(?:\?|#|$|\s|["\'])/i', $orig_str, $orig_matches );
+		if ( ! empty( $orig_matches[0] ) && is_array( $orig_matches[0] ) ) {
+			$orig_img_count = count( $orig_matches[0] );
+		}
+
+		$new_img_count = 0;
+		preg_match_all( '/\.(jpg|jpeg|png)(?:\?|#|$|\s|["\'])/i', $new_str, $new_matches );
+		if ( ! empty( $new_matches[0] ) && is_array( $new_matches[0] ) ) {
+			$new_img_count = count( $new_matches[0] );
+		}
+
+		$new_webp_count = 0;
+		preg_match_all( '/\.webp(?:\?|#|$|\s|["\'])/i', $new_str, $webp_matches );
+		if ( ! empty( $webp_matches[0] ) && is_array( $webp_matches[0] ) ) {
+			$new_webp_count = count( $webp_matches[0] );
+		}
+
+		// The difference in image extensions should equal the new webp count
+		$expected_webp_count = $orig_img_count - $new_img_count;
+		if ( $expected_webp_count > 0 && $new_webp_count !== $expected_webp_count ) {
+			return array(
+				'safe' => false,
+				'reason' => sprintf( 'Extension count mismatch: %d jpg/jpeg/png removed, %d webp added (expected %d)', $orig_img_count - $new_img_count, $new_webp_count, $expected_webp_count ),
+				'summary' => 'Extension count validation failed',
+			);
+		}
+
+		// Check 3: Create normalized versions (remove only the URL extensions) and compare
+		// This detects if anything OTHER than extensions changed
+		$orig_normalized = preg_replace( '/\.(jpg|jpeg|png|webp)(?:\?|#|$|\s|["\'])/i', '.[EXT]$1', $orig_str );
+		$new_normalized = preg_replace( '/\.(jpg|jpeg|png|webp)(?:\?|#|$|\s|["\'])/i', '.[EXT]$1', $new_str );
+		
+		// If normalized strings differ beyond extension placeholders, something else changed
+		// Allow for extension type changes (.jpg -> .webp markers)
+		$orig_clean = preg_replace( '/\[EXT\](jpg|jpeg|png|webp)/i', '[EXT]', $orig_normalized );
+		$new_clean = preg_replace( '/\[EXT\](jpg|jpeg|png|webp)/i', '[EXT]', $new_normalized );
+		
+		if ( $orig_clean !== $new_clean ) {
+			// Find first difference
+			$diff_pos = 0;
+			$min_len = min( strlen( $orig_clean ), strlen( $new_clean ) );
+			for ( $i = 0; $i < $min_len; $i++ ) {
+				if ( $orig_clean[ $i ] !== $new_clean[ $i ] ) {
+					$diff_pos = $i;
+					break;
+				}
+			}
+			
+			$context_before = substr( $orig_clean, max( 0, $diff_pos - 20 ), 40 );
+			$context_after = substr( $new_clean, max( 0, $diff_pos - 20 ), 40 );
+			
+			return array(
+				'safe' => false,
+				'reason' => sprintf( 'Non-extension differences detected at position %d', $diff_pos ),
+				'summary' => sprintf( 'Before: ...%s... After: ...%s...', $context_before, $context_after ),
+			);
+		}
+
+		// All checks passed - replacement is safe
+		return array( 'safe' => true );
 	}
 
 	/**
